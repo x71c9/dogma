@@ -1,0 +1,16 @@
+[package]
+name = "dogma"
+version = "0.0.1"
+authors = ["Andrea Reni <mail@x71c9.com>"]
+edition = "2021"
+description = "Opinionated CLI that bridges secrets from any vault backend and infrastructure outputs into sops-encrypted files deployed to remote machines, driven by a central dogma.yml config"
+repository = "https://github.com/x71c9/dogma"
+license = "MIT"
+
+[dependencies]
+
+[package.metadata.release]
+push = true
+publish = true
+tag-message = "chore(release): v{{version}}"
+pre-release-commit-message = "chore(release): release v{{version}}"
