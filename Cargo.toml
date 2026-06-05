@@ -1,5 +1,5 @@
 [package]
-name = "dogma"
+name = "dogma-rust"
 version = "0.0.1"
 authors = ["Andrea Reni <mail@x71c9.com>"]
 edition = "2021"
