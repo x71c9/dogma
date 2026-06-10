@@ -1,276 +1,342 @@
 # dogma
 
-Opinionated CLI that bridges secrets from any vault backend and infrastructure outputs into sops-encrypted files deployed to remote machines, driven by a central `dogma.yml` config.
+Bridges secrets from vault backends and infrastructure outputs into sops-encrypted files, then deploys them to NixOS machines. Also spawns pre-credentialed shells and exports all secrets as environment variables.
 
-## What it does
+> Crate: `dogma-rust` — Binary: `dogma`
 
-dogma solves the problem of getting secrets onto machines without ever storing them in plaintext. It pulls secret values from two sources:
-
-- **Vault backends** — environment variables, `pass`, or any custom plugin
-- **Infrastructure outputs** — OpenTofu / Terraform output values (e.g. a freshly provisioned server's IP or domain name)
-
-It then encrypts them per-machine with [sops](https://github.com/getsops/sops) and deploys them. On NixOS, a ready-made module mounts each secret at `/run/secrets/<group>/<field>`. On any other OS, the encrypted sops files are yours to use however you need.
-
-```
-dogma.yml
-    │
-    ├── vault refs  ──────────────────────────────────┐
-    │   (envvar / pass / custom)                      │
-    │                                                 ▼
-    └── infra outputs  ──────────────────────────► encrypt with sops
-        (OpenTofu / Terraform)                        │
-                                                      ▼
-                                              deploy to machines
-                                              /run/secrets/<group>/<field>
-```
-
-## Minimal example
-
-A single web server that needs a database password and a Stripe key:
+## Quick start
 
 ```yaml
 # dogma.yml
-
+name: myproject
+env: [dev, prod]
 admin:
-  - age: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   - gpg: 3246EC6F403D8F3403E34A90BCDABC277B1ED8AB
 
-env:
-  - dev
-  - staging
-  - prod
-
-machines:
-  web:
-    hostname: web-{env}
-    user: deployer
-    ip:
-      prod: 1.2.3.4
-    secrets:
-      - database
-      - stripe
-
-secrets:
-  database:
-    password:
-      from: vault
-      ref: db-password
-
-  stripe:
-    webhook_secret:
-      from: infra
-      output: stripe_webhook_secret
-      unit: payments
-
 vault:
-  db-password:
-    envvar: DB_PASSWORD
-```
-
-Run:
-
-```sh
-dogma deploy prod
-```
-
-dogma resolves `DB_PASSWORD` from your environment and `stripe_webhook_secret` from the OpenTofu `payments` unit output, encrypts them with sops for the `web` machine, and deploys. On the server, the secrets are available at:
-
-```
-/run/secrets/database/password
-/run/secrets/stripe/secret_key
-```
-
-## Real-world example
-
-Two servers across two environments. The database URL comes from an infrastructure output (the DB was just provisioned by OpenTofu), the API keys come from `pass`:
-
-```yaml
-admin:
-  - age: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-  - gpg: 3246EC6F403D8F3403E34A90BCDABC277B1ED8AB
-
-env:
-  - staging
-  - prod
-
-machines:
-  api:
-    hostname: myapp-{env}-api
-    user: deployer
-    ip:
-      from: infra
-      output: api_server_ip
-      unit: servers
-    secrets:
-      - database
-      - payments
-      - auth
-
-  worker:
-    hostname: myapp-{env}-worker
-    user: deployer
-    ip:
-      from: infra
-      output: worker_server_ip
-      unit: servers
-    secrets:
-      - database
-
-secrets:
-  database:
-    url:
-      from: infra
-      output: database_url
-      unit: servers
-
-  payments:
-    stripe_secret_key:
-      from: vault
-      ref: stripe-secret-key
-    stripe_webhook_secret:
-      from: vault
-      ref: stripe-webhook-secret
-
-  auth:
-    jwt_secret:
-      from: vault
-      ref: jwt-secret
-    github_oauth_secret:
-      from: vault
-      ref: github-oauth-secret
-
-vault:
-  stripe-secret-key:
-    envvar: STRIPE_SECRET_KEY
-    pass: stripe.com/myapp/{env}/secret-key
-
+  hcloud-token:
+    pass: myproject/{env}/hcloud-token
   stripe-webhook-secret:
-    envvar: STRIPE_WEBHOOK_SECRET
-    pass: stripe.com/myapp/{env}/webhook-secret
+    pass: myproject/{env}/stripe-webhook-secret
 
-  jwt-secret:
-    envvar: JWT_SECRET
-    pass: myapp/{env}/jwt-secret
-
-  github-oauth-secret:
-    envvar: GITHUB_OAUTH_SECRET
-    pass: github.com/myapp/{env}/oauth-secret
-```
-
-Deploy to staging:
-
-```sh
-dogma deploy staging
-```
-
-## Core concepts
-
-### dogma.yml
-
-A single file describes your entire deployment:
-
-| Section    | Purpose |
-|------------|---------|
-| `admin`    | GPG/age/SSH keys that can decrypt all secrets |
-| `env`      | List of environments (`dev`, `staging`, `prod`, …) |
-| `machines` | Machines with hostname, user, IP source, and secret groups |
-| `secrets`  | Secret groups — each leaf is `from: vault` or `from: infra` |
-| `vault`    | Named vault entries with one or more backends |
-| `infra`    | Infrastructure CLI (tofu/terraform), path, and credentials |
-| `nix`      | Nix flake root path (NixOS only) |
-
-### Secret groups
-
-Secrets are organized into named groups. Each leaf is resolved at deploy time from a vault backend or an infrastructure output:
-
-```yaml
-secrets:
-  database:
-    password:
+infra:
+  credentials:
+    TF_VAR_hcloud_token:
       from: vault
-      ref: db-password     # looks up 'db-password' in the vault section
-    host:
-      from: infra
-      output: db_host      # reads the 'db_host' output from OpenTofu
-      unit: database
-```
+      ref: hcloud-token
 
-### Vault backends
-
-Vault entries can have multiple backends. dogma picks the one active for the current run (`DOGMA_VAULT`, default: `envvar`):
-
-```yaml
-vault:
-  db-password:
-    envvar: DB_PASSWORD                        # reads $DB_PASSWORD
-    pass: myapp/{env}/database/password        # reads from pass store
-```
-
-Custom backends are supported: drop a `vault-<name>.sh` on your `PATH` and set `DOGMA_VAULT=<name>`.
-
-### Environments
-
-Use `{env}` as a placeholder anywhere in `dogma.yml` — hostnames, vault paths, infra outputs. dogma expands it to the target environment at deploy time:
-
-```yaml
 machines:
-  api:
-    hostname: myapp-{env}-api
+  backend:
+    hostname: myproject-{env}
+    ip: { from: infra, unit: hetzner, output: server_ip }
+    secrets: [backend]
 
-vault:
-  db-password:
-    pass: myapp/{env}/database/password
+secrets:
+  backend:
+    stripe_webhook_secret: { from: vault, ref: stripe-webhook-secret }
+    server_ip: { from: infra, unit: hetzner, output: server_ip }
 ```
+
+```
+$ dogma deploy prod --new
+dogma: checking dependencies...
+dogma: normalizing config...
+dogma: refreshing infra cache (hetzner)...
+dogma: generating .sops.yaml from SSH host keys...
+dogma: encrypting secrets for myproject-prod...
+dogma: deploying backend (1.2.3.4)...
+  → nixos-rebuild switch --target-host root@1.2.3.4 --flake .#myproject-prod
+dogma: tagging deploy/v26.06.0001
+dogma: done in 142s
+```
+
+```
+$ dogma infra apply prod hetzner
+dogma: normalizing config...
+dogma: resolving credentials...
+dogma: tofu init...
+dogma: tofu apply...
+  hcloud_server.backend: Creating...
+  hcloud_server.backend: Creation complete (id=12345678)
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+```
+$ dogma shell prod
+dogma: resolving TF_VAR_hcloud_token...
+dogma: entering prod shell (exit to return)
+[dogma-prod 14:23:01] ~/myproject $
+```
+
+```
+$ dogma env prod
+export BACKEND_STRIPE_WEBHOOK_SECRET='whsec_...'
+export BACKEND_SERVER_IP='1.2.3.4'
+```
+
+## Install
+
+```bash
+cargo install dogma-rust          # binary installed as `dogma`
+# or from source
+cargo build --release             # binary at target/release/dogma
+```
+
+Set `DOGMA_VAULT` per developer in `.bashrc` or per project in `shell.nix`:
+
+```bash
+export DOGMA_VAULT=pass           # or: envvar (default)
+```
+
+## Shell completion
+
+**Bash** — add to `~/.bashrc`:
+```bash
+source <(dogma completions bash)
+```
+
+**Zsh** — add to `~/.zshrc`:
+```bash
+source <(dogma completions zsh)
+```
+
+**Fish** — install once:
+```bash
+dogma completions fish > ~/.config/fish/completions/dogma.fish
+```
+
+`<env>` is completed from `dogma.yml`. `<unit>` is completed from subdirectories of `infra.path`. `<host>` is completed from machine names in `dogma.yml`.
 
 ## Commands
 
-```sh
-dogma deploy [--skip-infra] [--skip-sops] [--refetch] <env> [<host>]
-dogma apply  <env> <unit>    # tofu init + apply
-dogma destroy <env> <unit>   # tofu init + destroy
+### `dogma credentials <env>`
+
+Prints `export VAR='value'` for all `infra.credentials`. Eval to load.
+
+```bash
+eval $(dogma credentials dev)
 ```
 
-### deploy pipeline
+---
 
-1. **Normalize + validate** `dogma.yml` — expand `{env}` placeholders, check all refs exist
-2. **Refresh infra cache** — fetch OpenTofu outputs into `.dogma/cache/<env>.json`
-3. **Generate `.sops.yaml`** — fetch SSH host ed25519 keys, convert to age, write creation rules
-4. **Generate `secrets.nix`** — write the flat secret list consumed by the NixOS module
-5. **Encrypt secrets** — resolve each leaf, write YAML, encrypt with sops per machine
-6. **Deploy** — run `nixos-rebuild switch` (or your own deploy step) targeting each host
+### `dogma env <env>`
 
-## NixOS integration
+Prints `export GROUP_FIELD='value'` for every secret, uppercased.
 
-Set `dogma.machine` once per host. The module auto-mounts every secret at `/run/secrets/<group>/<field>`:
-
-```nix
-# hosts/api/default.nix
-{ config, ... }: {
-  dogma.machine = "api";
-}
+```bash
+eval $(dogma env dev)
+# → export BACKEND_API_KEY='...'
+# → export BACKEND_SERVER_IP='...'
 ```
 
-Override owner and mode per secret:
+---
 
-```nix
-dogma.secrets."database/password".owner = "myapp";
-dogma.secrets."database/password".mode  = "0440";
+### `dogma output <env> [unit] [key]`
+
+Reads from `.dogma/cache/<env>.json`.
+
+```bash
+dogma output dev                        # full JSON
+dogma output dev hetzner                # one unit
+dogma output dev hetzner server_ip      # raw value
 ```
 
-### Containers
+---
 
-Secrets are bind-mounted into declarative NixOS containers automatically:
+### `dogma shell <env>`
 
-```nix
-hnContainers.my-service = {
-  allSecrets = true;   # or: secrets = [ "database/password" ];
-  config = { ... };
-};
+Spawns a new shell with `infra.credentials` loaded. Prompt shows `[dogma-<env> HH:MM:SS]`. Exit to return.
+
+```bash
+dogma shell dev
 ```
 
-The `secrets-env` wrapper reads `/run/secrets/**` and exports each file as an uppercase environment variable — useful as an `ExecStart` prefix.
+---
 
-## Non-NixOS use
+### `dogma infra apply <env> <unit>`
 
-dogma does not require NixOS. The encrypted sops files written per machine are standard sops YAML files and can be decrypted and consumed by any tooling that speaks sops.
+Runs: normalize → validate → `tofu init` → `tofu apply`. Credentials injected as env vars.
 
+```bash
+dogma infra apply dev hetzner
+dogma infra apply dev hetzner --migrate-state
+```
+
+---
+
+### `dogma infra destroy <env> <unit>`
+
+Same as `apply` but runs `tofu destroy`.
+
+---
+
+### `dogma deploy <env> [host]`
+
+Full deploy pipeline.
+
+```bash
+dogma deploy dev --new                         # new CalVer version, full pipeline
+dogma deploy dev --latest                      # promote latest deploy/* tag
+dogma deploy dev --version deploy/v26.06.0001  # promote specific tag
+dogma deploy dev                               # interactive: pick from tag list
+dogma deploy dev backend --new                 # one host only
+```
+
+**`--new` pipeline:**
+
+| Step | Action |
+|------|--------|
+| 0 | Dep check: `ssh-keyscan`, `ssh-to-age`, `sops`, `nixos-rebuild` |
+| 1 | Normalize + validate `dogma.yml` |
+| 2 | Dirty tree check — commit or abort |
+| 3 | Pre-deploy hooks |
+| 4 | Infra cache refresh (all envs) |
+| 5 | Generate `.sops.yaml` from SSH host keys |
+| 6 | Encrypt secrets with sops, commit |
+| 7 | `nixos-rebuild switch` per host |
+| 8 | Git tags + push |
+| 9 | Post-deploy hooks |
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--new` | Create new CalVer version, run full pipeline |
+| `--latest` | Promote latest `deploy/*` tag (no hooks) |
+| `--version <tag>` | Promote specific tag (no hooks) |
+| `--skip-infra` | Use existing infra cache |
+| `--skip-sops` | Use existing `.sops.yaml` |
+| `--refetch` | Clear all caches and re-fetch |
+| `-m <msg>` | Commit message for dirty tree (only with `--new`) |
+
+---
+
+### `--time`
+
+Global flag. Prints elapsed ms to stderr after any command.
+
+```bash
+dogma --time deploy dev --new
+```
+
+## dogma.yml reference
+
+```yaml
+name: myproject             # used in auto-derived vault paths
+
+env:                        # list of environments
+  - dev
+  - prod
+
+admin:                      # age/gpg/ssh keys for sops encryption
+  - gpg: <fingerprint>
+  - age: age1...
+  - ssh: ~/.ssh/id_ed25519.pub
+
+infra:
+  cli: tofu                 # or: terraform (default: tofu)
+  path: ./infra             # default: ./infra
+  credentials:
+    STATIC_VAR: value       # injected as-is into tofu
+    SECRET_VAR:
+      from: vault
+      ref: <vault-key>
+
+vault:
+  <key>:
+    pass: path/{env}/key    # {env} substituted per environment
+    envvar: MY_VAR          # flat string or per-env map; auto-derived if omitted
+
+machines:
+  <name>:
+    hostname: host-{env}    # {env} substituted; or per-env map
+    user: deployer          # default: root
+    ip: "1.2.3.4"           # static IP
+    ip:                     # or from infra output
+      from: infra
+      unit: <unit>
+      output: <output-key>
+    secrets:                # secret groups to encrypt for this machine
+      - <group>
+    deployer: nixos-rebuild # default; only option currently
+
+secrets:
+  <group>:
+    <field>:
+      from: vault
+      ref: <vault-key>
+    <field>:
+      from: infra
+      unit: <unit>
+      output: <output-key>
+
+nix:
+  path: ./nix               # default: ./nix
+  secrets: ./nix/secrets    # default: ./nix/secrets
+  sops: ./nix/.sops.yaml    # default: ./nix/.sops.yaml
+
+deploy:
+  strategy: nixos-rebuild   # default
+
+hooks:
+  pre-deploy:
+    - ./custom/bump-version.sh
+  post-deploy:
+    - ./custom/notify-slack.sh
+```
+
+## Vault backends
+
+Set `DOGMA_VAULT` per developer — not in `dogma.yml`.
+
+| Backend | `DOGMA_VAULT` | How it resolves |
+|---------|---------------|-----------------|
+| `envvar` | (default) | Reads `$VAR` from process env. Var name from `vault.<key>.envvar.<env>`, auto-derived as `UPPER_SNAKE` if omitted |
+| `pass` | `pass` | Calls `pass <path>`. Path from `vault.<key>.pass.<env>`, auto-derived as `<name>/<env>/<key>` if omitted |
+
+## Hooks
+
+Scripts must be executable. Both hooks receive:
+
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `DOGMA_VERSION` | `deploy/v26.06.0001` | CalVer tag |
+| `DOGMA_ENV` | `dev` | Target environment |
+| `DOGMA_HOSTS` | `backend\nworker` | Newline-separated machine names |
+| `DOGMA_DEPLOYED_IPS` | `deployer@1.2.3.4` | Post-deploy only |
+
+```bash
+#!/usr/bin/env bash
+# custom/bump-version.sh — write version into package.json
+version="${DOGMA_VERSION#deploy/}"
+jq --arg v "$version" '.version = $v' backend/package.json > tmp && mv tmp backend/package.json
+```
+
+## Generated files
+
+Add to `.gitignore`:
+
+```
+.dogma/dogma-expanded.yml
+.dogma/cache/
+.dogma/age-keys/
+```
+
+| File | Purpose |
+|------|---------|
+| `.dogma/dogma-expanded.yml` | Normalized config with all defaults filled in |
+| `.dogma/cache/<env>.json` | Cached infra outputs |
+| `.dogma/age-keys/<host>.pub` | Cached SSH→age host keys |
+
+## Runtime dependencies
+
+The binary runs on any Linux with no runtime deps. External tools are checked lazily — only when the command that needs them actually runs.
+
+| Tool | Required by |
+|------|-------------|
+| `pass` | `DOGMA_VAULT=pass` |
+| `tofu` / `terraform` | `infra apply`, `infra destroy`, `deploy` |
+| `ssh-keyscan` | `deploy --new` |
+| `ssh-to-age` | `deploy --new` |
+| `sops` | `deploy --new` |
+| `nixos-rebuild` | `deploy` (nixos-rebuild strategy) |

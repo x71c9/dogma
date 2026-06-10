@@ -7,7 +7,23 @@ description = "Opinionated CLI that bridges secrets from any vault backend and i
 repository = "https://github.com/x71c9/dogma"
 license = "MIT"
 
+[[bin]]
+name = "dogma"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+git2 = { version = "0.20", default-features = false }
+indexmap = { version = "2", features = ["serde"] }
+pathdiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+shellexpand = "3"
+tempfile = "3"
+which = "6"
 
 [package.metadata.release]
 push = true
