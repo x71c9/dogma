@@ -1,11 +1,11 @@
 use crate::cli::CompletionShell;
 
 pub fn run(shell: &CompletionShell) {
-    match shell {
-        CompletionShell::Bash => print!("{}", BASH),
-        CompletionShell::Zsh => print!("{}", ZSH),
-        CompletionShell::Fish => print!("{}", FISH),
-    }
+  match shell {
+    CompletionShell::Bash => print!("{}", BASH),
+    CompletionShell::Zsh => print!("{}", ZSH),
+    CompletionShell::Fish => print!("{}", FISH),
+  }
 }
 
 // ---------------------------------------------------------------------------
