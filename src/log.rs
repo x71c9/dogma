@@ -12,54 +12,88 @@ fn colors_enabled() -> bool {
 }
 
 const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
 const BLUE: &str = "\x1b[34m";
 const YELLOW: &str = "\x1b[33m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
-/// Normal progress line: red "dogma: " + plain message.
+/// Splits a leading "subsystem: " off a message, returning (tag, rest).
+/// A tag is the leading run of word/`-` chars immediately followed by ": ".
+/// Messages without that shape yield `(None, whole message)`.
+fn split_tag(msg: &str) -> (Option<&str>, &str) {
+  if let Some((head, rest)) = msg.split_once(": ") {
+    if !head.is_empty()
+      && head.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+      return (Some(head), rest);
+    }
+  }
+  (None, msg)
+}
+
+/// Renders "[dogma] [tag] rest" (or "[dogma] rest" when `tag` is None) with the
+/// whole line wrapped in `color`. The leading "subsystem: " in the message is
+/// always stripped — it is no longer shown as a tag. `color` empty (or colors
+/// disabled) prints uncolored.
+fn emit(color: &str, tag: Option<&str>, msg: &str) {
+  let (_subsystem, rest) = split_tag(msg);
+  let line = match tag {
+    Some(t) => format!("[dogma] [{t}] {rest}"),
+    None => format!("[dogma] {rest}"),
+  };
+  if colors_enabled() && !color.is_empty() {
+    eprintln!("{color}{line}{RESET}");
+  } else {
+    eprintln!("{line}");
+  }
+}
+
+/// Normal progress line: default color.
 pub fn info(msg: &str) {
-  if colors_enabled() {
-    eprintln!("{RED}dogma:{RESET} {msg}");
-  } else {
-    eprintln!("dogma: {msg}");
-  }
+  emit("", None, msg);
 }
 
-/// Section header: red "dogma: " + cyan message.
+/// Section header: blue.
 pub fn step(msg: &str) {
-  if colors_enabled() {
-    eprintln!("{RED}dogma:{RESET} {BLUE}{msg}{RESET}");
-  } else {
-    eprintln!("dogma: {msg}");
-  }
+  emit(BLUE, None, msg);
 }
 
-/// De-emphasized line (cached, skipped, unchanged): entirely dim.
+/// De-emphasized line (cached, skipped, unchanged): dim.
 pub fn dim(msg: &str) {
-  if colors_enabled() {
-    eprintln!("{DIM}dogma: {msg}{RESET}");
-  } else {
-    eprintln!("dogma: {msg}");
-  }
+  emit(DIM, None, msg);
 }
 
-/// Warning: red "dogma: " + yellow message.
+/// Warning: yellow, tagged "[warning]".
 pub fn warn(msg: &str) {
+  emit(YELLOW, Some("warning"), msg);
+}
+
+/// Formats a `git status`-style entry: a colored status letter then the path,
+/// indented two spaces (e.g. "  M shell.nix"). Green for added, red for deleted,
+/// yellow for modified/renamed.
+pub fn status_line(status: char, path: &str) {
   if colors_enabled() {
-    eprintln!("{RED}dogma:{RESET} {YELLOW}{msg}{RESET}");
+    let color = match status {
+      'A' => GREEN,
+      'D' => RED,
+      _ => YELLOW,
+    };
+    eprintln!("  {color}{status}{RESET} {path}");
   } else {
-    eprintln!("dogma: {msg}");
+    eprintln!("  {status} {path}");
   }
 }
 
-/// Fatal error: red "dogma: error: " + message.
+/// "[dogma] " prefix for inline prompts (no trailing newline). Use with
+/// `eprint!` so prompts match the bracketed style of info lines.
+pub fn prompt_prefix() -> String {
+  "[dogma] ".to_string()
+}
+
+/// Fatal error: whole line red, rendered as "[dogma] [error] <msg>".
 pub fn error(msg: &str) {
-  if colors_enabled() {
-    eprintln!("{RED}dogma: error:{RESET} {msg}");
-  } else {
-    eprintln!("dogma: error: {msg}");
-  }
+  emit(RED, Some("error"), msg);
 }
 
 #[macro_export]

@@ -60,11 +60,16 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
   let original_ref = git::current_ref(&repo)?;
   let mut detached = false;
+  // Tracks whether dogma has authored a commit this run. Once true, later
+  // stages (hooks, secrets) fold their changes into it via amend instead of
+  // creating separate commits — yielding a single clean deploy commit.
+  let mut created_deploy_commit = false;
 
   if !dirty.is_empty() {
     log_warn!("deploy: working tree has uncommitted changes:");
+    eprintln!();
     for f in &dirty.files {
-      eprintln!("  {f}");
+      crate::log::status_line(f.status, &f.path);
     }
     eprintln!();
 
@@ -78,7 +83,10 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         m.clone()
       }
       None => {
-        eprint!("dogma: deploy: commit these changes before deploying? [Y/n] ");
+        eprint!(
+          "{}commit these changes before deploying? [Y/n] ",
+          crate::log::prompt_prefix()
+        );
         io::stderr().flush()?;
         let mut answer = String::new();
         io::stdin().read_line(&mut answer)?;
@@ -88,7 +96,10 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         let suggested = git::suggest_commit_msg(&repo);
         let prompt_msg = if let Some(ref s) = suggested {
           log_dim!("deploy: suggested message: {s}");
-          eprint!("dogma: deploy: commit message (leave blank to accept): ");
+          eprint!(
+            "{}commit message (leave blank to accept): ",
+            crate::log::prompt_prefix()
+          );
           io::stderr().flush()?;
           let mut m = String::new();
           io::stdin().read_line(&mut m)?;
@@ -99,7 +110,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
             m
           }
         } else {
-          eprint!("dogma: deploy: commit message: ");
+          eprint!("{}commit message: ", crate::log::prompt_prefix());
           io::stderr().flush()?;
           let mut m = String::new();
           io::stdin().read_line(&mut m)?;
@@ -114,6 +125,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
     };
 
     git::commit_all(&repo, &msg)?;
+    created_deploy_commit = true;
     log_info!("deploy: committed: {msg}");
   }
 
@@ -166,7 +178,8 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         eprintln!("  [{}] {tag}{marker}", i + 1);
       }
       eprint!(
-        "dogma: deploy: select version to deploy to '{}' [1]: ",
+        "{}select version to deploy to '{}' [1]: ",
+        crate::log::prompt_prefix(),
         opts.env
       );
       io::stderr().flush()?;
@@ -226,9 +239,15 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
     let hook_dirty = git::dirty_files(&repo)?;
     if !hook_dirty.is_empty() {
-      let msg = format!("chore: release {dogma_version}");
-      git::commit_all(&repo, &msg)?;
-      log_info!("deploy: committed: {msg}");
+      if created_deploy_commit {
+        git::amend_all(&repo)?;
+        log_info!("deploy: folded hook changes into deploy commit");
+      } else {
+        let msg = format!("chore: release {dogma_version}");
+        git::commit_all(&repo, &msg)?;
+        created_deploy_commit = true;
+        log_info!("deploy: committed: {msg}");
+      }
     } else {
       log_dim!("deploy: hooks made no tracked changes");
     }
@@ -320,11 +339,17 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       repo_root.join(config.nix.secrets.trim_start_matches("./"));
     let secret_dirty = git::dirty_files(&repo)?;
     if !secret_dirty.is_empty() {
-      git::commit_all(
-        &repo,
-        "chore(secrets): update encrypted secrets (all envs)",
-      )?;
-      log_info!("deploy: committed secrets");
+      if created_deploy_commit {
+        git::amend_all(&repo)?;
+        log_info!("deploy: folded encrypted secrets into deploy commit");
+      } else {
+        // Last stage that can commit — no need to update the flag.
+        git::commit_all(
+          &repo,
+          "chore(secrets): update encrypted secrets (all envs)",
+        )?;
+        log_info!("deploy: committed secrets");
+      }
     } else {
       log_dim!("deploy: secrets unchanged — nothing to commit");
     }
