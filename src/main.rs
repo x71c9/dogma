@@ -24,7 +24,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-  let cli = Cli::parse();
+  let cli = parse_cli();
   let start = cli.time.then(Instant::now);
 
   // --list-* flags: read dogma.yml and print completions, then exit.
@@ -174,6 +174,34 @@ fn run() -> Result<()> {
   }
 
   Ok(())
+}
+
+/// Parse argv. On an unrecognized/missing subcommand, clap's default message is
+/// terse (just a usage line). Augment those cases to also print the list of
+/// available subcommands, then exit as clap normally would.
+fn parse_cli() -> Cli {
+  use clap::error::ErrorKind;
+  use clap::CommandFactory;
+
+  match Cli::try_parse() {
+    Ok(cli) => cli,
+    Err(e) => {
+      if matches!(
+        e.kind(),
+        ErrorKind::InvalidSubcommand | ErrorKind::MissingSubcommand
+      ) {
+        // Print clap's own error (usage + tip), then the subcommand list.
+        e.print().ok();
+        eprintln!();
+        Cli::command().print_help().ok();
+        eprintln!();
+        std::process::exit(2);
+      }
+      // All other parse errors (bad flags, --help, --version) keep clap's
+      // native handling and exit codes.
+      e.exit();
+    }
+  }
 }
 
 fn find_repo_root() -> Result<std::path::PathBuf> {

@@ -10,13 +10,36 @@ pub fn open(repo_root: &Path) -> Result<Repository> {
 // Dirty tree check
 // ---------------------------------------------------------------------------
 
+pub struct DirtyFile {
+  /// Single-letter status, porcelain-style: M, D, A (new), R (renamed), ? else.
+  pub status: char,
+  pub path: String,
+}
+
 pub struct DirtyFiles {
-  pub files: Vec<String>,
+  pub files: Vec<DirtyFile>,
 }
 
 impl DirtyFiles {
   pub fn is_empty(&self) -> bool {
     self.files.is_empty()
+  }
+}
+
+/// Maps a git2 status to a single porcelain-style letter. Index (staged) state
+/// takes precedence over worktree state, matching `git status` column ordering.
+fn status_char(s: git2::Status) -> char {
+  use git2::Status;
+  if s.intersects(Status::INDEX_NEW) {
+    'A'
+  } else if s.intersects(Status::INDEX_RENAMED) {
+    'R'
+  } else if s.intersects(Status::INDEX_DELETED | Status::WT_DELETED) {
+    'D'
+  } else if s.intersects(Status::INDEX_MODIFIED | Status::WT_MODIFIED) {
+    'M'
+  } else {
+    '?'
   }
 }
 
@@ -42,7 +65,12 @@ pub fn dirty_files(repo: &Repository) -> Result<DirtyFiles> {
           | git2::Status::WT_DELETED,
       )
     })
-    .filter_map(|e| e.path().map(str::to_string))
+    .filter_map(|e| {
+      e.path().map(|p| DirtyFile {
+        status: status_char(e.status()),
+        path: p.to_string(),
+      })
+    })
     .collect();
 
   Ok(DirtyFiles { files })
@@ -63,6 +91,22 @@ pub fn commit_all(repo: &Repository, message: &str) -> Result<()> {
   let parent = repo.head()?.peel_to_commit()?;
 
   repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+  Ok(())
+}
+
+/// Fold all working-tree changes into the current HEAD commit, keeping its
+/// original message and parents (equivalent to `git commit --amend --no-edit -a`).
+pub fn amend_all(repo: &Repository) -> Result<()> {
+  let mut index = repo.index()?;
+  index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+  index.write()?;
+
+  let oid = index.write_tree()?;
+  let tree = repo.find_tree(oid)?;
+  let head = repo.head()?.peel_to_commit()?;
+  let message = head.message().unwrap_or("").to_string();
+
+  head.amend(Some("HEAD"), None, None, None, Some(&message), Some(&tree))?;
   Ok(())
 }
 
