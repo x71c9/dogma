@@ -24,7 +24,9 @@ const RESET: &str = "\x1b[0m";
 fn split_tag(msg: &str) -> (Option<&str>, &str) {
   if let Some((head, rest)) = msg.split_once(": ") {
     if !head.is_empty()
-      && head.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+      && head
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
       return (Some(head), rest);
     }
