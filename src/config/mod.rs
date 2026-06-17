@@ -198,6 +198,12 @@ pub struct InfraBlock {
   #[serde(default = "default_infra_path")]
   pub path: String,
 
+  #[serde(default = "default_var_file")]
+  pub var_file: String,
+
+  #[serde(default = "default_backend_config")]
+  pub backend_config: String,
+
   #[serde(default)]
   pub credentials: IndexMap<String, CredentialValue>,
 }
@@ -207,6 +213,12 @@ fn default_tofu() -> String {
 }
 fn default_infra_path() -> String {
   "./infra".to_string()
+}
+pub fn default_var_file() -> String {
+  "variables/{env}/main.tfvars".to_string()
+}
+pub fn default_backend_config() -> String {
+  "variables/{env}/backend.conf".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

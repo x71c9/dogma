@@ -39,9 +39,15 @@ for f in "${rs_files[@]}"; do
   # always exits 0), so we materialize the staged blob to a temp .rs file.
   # That temp file lives outside the repo, so point rustfmt at rustfmt.toml
   # explicitly or it would fall back to default formatting rules.
+  #
+  # skip_children=true: a file with `mod foo;` declarations (e.g. mod.rs) would
+  # otherwise make rustfmt try to open foo.rs next to the temp file, fail with
+  # "failed to resolve mod", and exit non-zero — a false "not formatted"
+  # report. Skipping children formats only this file and keeps the file-mode
+  # exit code (stdin mode always exits 0, so it can't be used here).
   tmpfile="${tmpdir}/check.rs"
   git show ":$f" > "$tmpfile"
-  if ! rustfmt "${config_arg[@]}" --check "$tmpfile" >/dev/null 2>&1; then
+  if ! rustfmt "${config_arg[@]}" --config skip_children=true --check "$tmpfile" >/dev/null 2>&1; then
     unformatted+=("$f")
   fi
 done

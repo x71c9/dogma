@@ -39,6 +39,12 @@ fn expand_defaults(config: &mut DogmaConfig) {
     if infra.path.is_empty() {
       infra.path = "./infra".to_string();
     }
+    if infra.var_file.is_empty() {
+      infra.var_file = crate::config::default_var_file();
+    }
+    if infra.backend_config.is_empty() {
+      infra.backend_config = crate::config::default_backend_config();
+    }
   }
 
   // Nix defaults: secrets and sops derived from path
