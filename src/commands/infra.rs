@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::normalize::normalize;
@@ -119,6 +119,18 @@ struct InitArgs<'a> {
   credentials: &'a [(String, String)],
 }
 
+/// Expand a path template relative to the infra directory.
+/// The only supported placeholder is `{env}`.
+fn resolve_template(
+  repo_root: &Path,
+  infra_path: &str,
+  template: &str,
+  env: &str,
+) -> PathBuf {
+  let rel = template.replace("{env}", env);
+  repo_root.join(infra_path).join(rel)
+}
+
 fn run_init(
   config: &DogmaConfig,
   repo_root: &Path,
@@ -135,7 +147,7 @@ fn run_init(
   let infra = config.infra.as_ref().unwrap();
   let infra_path = infra.path.trim_start_matches("./");
   let backend_conf =
-    repo_root.join(format!("{infra_path}/env/{env}/backend.conf"));
+    resolve_template(repo_root, infra_path, &infra.backend_config, env);
 
   if !backend_conf.exists() {
     bail!("backend config not found: {}", backend_conf.display());
@@ -179,7 +191,7 @@ fn run_subcommand(
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
   let infra_path = infra.path.trim_start_matches("./");
-  let tfvars = repo_root.join(format!("{infra_path}/env/{env}/{env}.tfvars"));
+  let tfvars = resolve_template(repo_root, infra_path, &infra.var_file, env);
 
   if !tfvars.exists() {
     bail!("tfvars not found: {}", tfvars.display());
