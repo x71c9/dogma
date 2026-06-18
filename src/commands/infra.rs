@@ -95,6 +95,20 @@ fn run_infra(
     &credentials,
   )?;
 
+  // Cache this unit's outputs now that apply succeeded: they exist in remote
+  // state, so `dogma output`/`env`/`deploy` can read them without a separate
+  // run. refresh merges into .dogma/cache/<env>.json, preserving other units'
+  // cached values. Only apply caches; failures here are non-fatal — the infra
+  // change already succeeded.
+  if subcommand == "apply" {
+    log_step!("infra cache outputs {unit}");
+    if let Err(e) =
+      crate::infra::output::refresh(config, repo_root, env, Some(unit))
+    {
+      log_warn!("infra failed to cache outputs: {e:#}");
+    }
+  }
+
   // Record the commit that was just applied so the exact code can be checked
   // out later (e.g. to destroy resources whose defining code has since
   // changed). Only apply writes this breadcrumb; failures here are
