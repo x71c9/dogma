@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-use crate::commands::infra::resolve_credentials;
+use crate::commands::infra::{init_unit, resolve_credentials};
 use crate::config::DogmaConfig;
 use crate::error::check_dep;
 use crate::{log_dim, log_info};
@@ -49,8 +49,25 @@ pub fn refresh(
   };
 
   for unit in &units {
+    let unit_dir = infra_dir.join(unit);
+    // Re-init the unit for THIS env's backend before reading outputs: the
+    // unit's .terraform/ may have been left pointing at another env's state
+    // bucket by a previous run, which would make `tofu output` read the wrong
+    // state (or 403 with this env's credentials). See init_unit's -reconfigure.
+    log_info!("infra init {unit} ...");
+    init_unit(
+      config,
+      repo_root,
+      cli,
+      &unit_dir,
+      env,
+      unit,
+      false,
+      &credentials,
+    )?;
+
     log_info!("infra fetching outputs: {unit} ...");
-    let flat = fetch_unit_outputs(cli, &infra_dir.join(unit), &credentials)?;
+    let flat = fetch_unit_outputs(cli, &unit_dir, &credentials)?;
     merged[unit] = flat;
   }
 

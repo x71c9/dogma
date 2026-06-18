@@ -251,7 +251,20 @@ pub fn restore_ref(repo: &Repository, ref_name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn push_commits(repo: &Repository) -> Result<()> {
-  push_refspec(repo, "HEAD")
+  // Push HEAD to its branch by name. A bare "HEAD" refspec is ambiguous on a
+  // normal remote (`git push origin HEAD` can't tell which branch to update)
+  // and is rejected; `HEAD:refs/heads/<branch>` is explicit and works across
+  // gcrypt/ssh/https alike.
+  let head = repo.head()?;
+  if !head.is_branch() {
+    bail!(
+      "HEAD is detached — refusing to push commits without a branch to push to"
+    );
+  }
+  let branch = head.shorthand().ok_or_else(|| {
+    anyhow::anyhow!("could not determine current branch name")
+  })?;
+  push_refspec(repo, &format!("HEAD:refs/heads/{branch}"))
 }
 
 pub fn push_tag(repo: &Repository, tag_name: &str) -> Result<()> {

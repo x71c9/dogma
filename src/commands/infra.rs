@@ -7,7 +7,7 @@ use crate::config::validate::validate;
 use crate::config::{CredentialValue, DogmaConfig};
 use crate::error::check_dep;
 use crate::vault;
-use crate::{git, log_info, log_step, log_warn};
+use crate::{git, log_dim, log_info, log_step, log_warn};
 
 pub fn apply(
   repo_root: &Path,
@@ -193,14 +193,33 @@ fn run_init(
   repo_root: &Path,
   args: InitArgs<'_>,
 ) -> Result<()> {
-  let InitArgs {
-    cli,
-    unit_dir,
-    env,
-    unit,
-    migrate_state,
-    credentials,
-  } = args;
+  init_unit(
+    config,
+    repo_root,
+    args.cli,
+    args.unit_dir,
+    args.env,
+    args.unit,
+    args.migrate_state,
+    args.credentials,
+  )
+}
+
+/// Run `<cli> init` for a single unit, pointing it at the backend bucket for
+/// `env` (via the env's backend.conf) and the per-unit state key. `-reconfigure`
+/// is used so the unit's `.terraform/` is re-pointed to the correct env backend
+/// even if it was previously initialized for a different env.
+#[allow(clippy::too_many_arguments)]
+pub fn init_unit(
+  config: &DogmaConfig,
+  repo_root: &Path,
+  cli: &str,
+  unit_dir: &Path,
+  env: &str,
+  unit: &str,
+  migrate_state: bool,
+  credentials: &[(String, String)],
+) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
   let infra_path = infra.path.trim_start_matches("./");
   let backend_conf =
@@ -210,13 +229,25 @@ fn run_init(
     bail!("backend config not found: {}", backend_conf.display());
   }
 
+  let state_key_value = format!("{unit}/terraform.tfstate");
+
+  // Skip init when the unit is already initialized for this exact backend
+  // (same bucket + state key). `-migrate-state` always re-runs so state moves
+  // are never silently skipped.
+  if !migrate_state
+    && backend_already_correct(unit_dir, &backend_conf, &state_key_value)
+  {
+    log_dim!("infra {unit} already initialized for {env} — skipping init");
+    return Ok(());
+  }
+
   let reconfigure_flag = if migrate_state {
     "-migrate-state"
   } else {
     "-reconfigure"
   };
 
-  let state_key = format!("key={unit}/terraform.tfstate");
+  let state_key = format!("key={state_key_value}");
   let backend_conf_flag = format!("-backend-config={}", backend_conf.display());
 
   let status = Command::new(cli)
@@ -235,6 +266,55 @@ fn run_init(
     bail!("'{cli} init' failed for unit '{}'", unit_dir.display());
   }
   Ok(())
+}
+
+/// True when the unit's existing `.terraform/terraform.tfstate` is already
+/// configured for the same S3 backend (bucket + state key) we are about to
+/// init. Lets callers skip a redundant `init -reconfigure`.
+///
+/// The bucket is read from the env's backend.conf (only the `bucket = "..."`
+/// line is parsed — no other backend.conf value is touched) and compared with
+/// the bucket + key recorded in the unit's local terraform state. Any parse
+/// failure or missing file returns false, so we fall back to running init.
+fn backend_already_correct(
+  unit_dir: &Path,
+  backend_conf: &Path,
+  state_key: &str,
+) -> bool {
+  let Some(want_bucket) = backend_conf_bucket(backend_conf) else {
+    return false;
+  };
+
+  let state_path = unit_dir.join(".terraform/terraform.tfstate");
+  let Ok(raw) = std::fs::read_to_string(&state_path) else {
+    return false;
+  };
+  let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    return false;
+  };
+
+  let cfg = &json["backend"]["config"];
+  cfg["bucket"].as_str() == Some(want_bucket.as_str())
+    && cfg["key"].as_str() == Some(state_key)
+}
+
+/// Extract just the `bucket` value from a backend.conf (HCL-ish `key = "value"`
+/// lines). Returns None if absent. Other lines are ignored — backend.conf may
+/// hold credentials, so nothing else is read out of it.
+fn backend_conf_bucket(backend_conf: &Path) -> Option<String> {
+  let raw = std::fs::read_to_string(backend_conf).ok()?;
+  for line in raw.lines() {
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("bucket") else {
+      continue;
+    };
+    let rest = rest.trim_start();
+    let Some(rest) = rest.strip_prefix('=') else {
+      continue;
+    };
+    return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+  }
+  None
 }
 
 fn run_subcommand(

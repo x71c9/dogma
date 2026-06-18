@@ -56,7 +56,11 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   log_step!("deploy [2] dirty tree check");
   let repo = git::open(repo_root)?;
-  let dirty = git::dirty_files(&repo, false)?;
+  // Include untracked files: a deploy/* tag must be a COMPLETE snapshot so it
+  // can be promoted to other envs. An untracked file (e.g. terraform-generated
+  // nixos-config) left out of the tagged commit would make the promoted version
+  // differ from what was built locally.
+  let dirty = git::dirty_files(&repo, true)?;
 
   let original_ref = git::current_ref(&repo)?;
   let mut detached = false;
@@ -271,20 +275,31 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       }
     }
   } else {
+    let cache_path = |e: &str| repo_root.join(format!(".dogma/cache/{e}.json"));
+
     let envs_to_refresh: Vec<&str> = if matches!(opts.mode, Mode::New) {
+      // --new builds a promotable commit: it encrypts EVERY env's secrets so a
+      // later `dogma deploy <other-env>` can deploy this exact commit. Those
+      // secrets are read from each env's infra cache. But hitting the cloud for
+      // every env would require every env's credentials on this machine, which
+      // is rarely true. So: always refresh the target env, and for the other
+      // envs only hit the cloud when their cache is missing OR empty/stale
+      // (otherwise reuse it). --refetch forces a full refresh of all envs.
       if opts.refetch {
         for e in &all_envs {
-          let _ = std::fs::remove_file(
-            repo_root.join(format!(".dogma/cache/{e}.json")),
-          );
+          let _ = std::fs::remove_file(cache_path(e));
         }
+        all_envs.iter().map(String::as_str).collect()
+      } else {
+        all_envs
+          .iter()
+          .map(String::as_str)
+          .filter(|e| *e == opts.env || !cache_is_usable(&cache_path(e)))
+          .collect()
       }
-      all_envs.iter().map(String::as_str).collect()
     } else {
       if opts.refetch {
-        let _ = std::fs::remove_file(
-          repo_root.join(format!(".dogma/cache/{}.json", opts.env)),
-        );
+        let _ = std::fs::remove_file(cache_path(&opts.env));
       }
       vec![opts.env.as_str()]
     };
@@ -462,6 +477,24 @@ fn check_all_deps() -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Whether an env's infra cache can be reused as-is. A cache is usable only if
+/// it parses and has at least one unit with a non-empty output object. A missing
+/// file, unparseable JSON, or a skeleton like `{"hetzner":{},"mailgun":{}}`
+/// (written before the env's infra was applied) is treated as needing a refresh.
+fn cache_is_usable(cache_file: &Path) -> bool {
+  let Ok(raw) = std::fs::read_to_string(cache_file) else {
+    return false;
+  };
+  let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    return false;
+  };
+  json.as_object().is_some_and(|units| {
+    units
+      .values()
+      .any(|u| u.as_object().is_some_and(|o| !o.is_empty()))
+  })
+}
+
 fn config_needs_infra(config: &DogmaConfig, env: &str) -> bool {
   for machine in config.machines.values() {
     if let IpField::PerEnv(map) = &machine.ip {
@@ -494,8 +527,6 @@ fn encrypt_secrets(
 
   for env in all_envs {
     for (host_name, machine) in &config.machines {
-      let hostname = machine.hostname.get(env, host_name);
-
       for group in &machine.secrets {
         if let Some(fields) = config.secrets.get(group) {
           let mut tmp = tempfile::NamedTempFile::new()?;
@@ -513,7 +544,8 @@ fn encrypt_secrets(
             writeln!(tmp, "{field}: {}", serde_json::to_string(&value)?)?;
           }
 
-          let out_dir = repo_root.join(format!("{nix_secrets}/{hostname}"));
+          let out_dir =
+            repo_root.join(format!("{nix_secrets}/{env}/{host_name}"));
           std::fs::create_dir_all(&out_dir)?;
           let out_file = out_dir.join(format!("{group}.yaml"));
 
@@ -558,10 +590,9 @@ fn verify_secrets_committed(
   let repo = git::open(repo_root)?;
 
   for (host_name, machine) in &config.machines {
-    let hostname = machine.hostname.get(env, host_name);
     for group in &machine.secrets {
       let secret_file =
-        repo_root.join(format!("{nix_secrets}/{hostname}/{group}.yaml"));
+        repo_root.join(format!("{nix_secrets}/{env}/{host_name}/{group}.yaml"));
       if !secret_file.exists() {
         bail!(
           "secret not committed for {env}: {}\nRun: dogma deploy {env} --new",
@@ -682,9 +713,13 @@ fn release_tag(
     }
   );
 
-  git::push_commits(repo)?;
-
   if is_new {
+    // Only --new creates a commit (on a branch) + the version tag. Promotion
+    // modes run on a detached HEAD at an existing deploy/* tag — the commit and
+    // version tag already exist and were pushed by the original --new, so there
+    // is nothing to push here beyond the deployed-* marker below.
+    git::push_commits(repo)?;
+
     if git::tag_exists(repo, version)? {
       bail!("tag '{version}' already exists");
     }

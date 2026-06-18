@@ -71,8 +71,12 @@ pub fn run(
         }
       };
 
-      let path_regex =
-        format!("{}/{}/.*\\.yaml$", secrets_rel.display(), hostname);
+      let path_regex = format!(
+        "{}/{}/{}/.*\\.yaml$",
+        secrets_rel.display(),
+        env_name,
+        host_name
+      );
 
       rules.push_str(&format!("\n  - path_regex: {path_regex}"));
 
