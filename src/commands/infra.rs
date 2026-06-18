@@ -7,7 +7,7 @@ use crate::config::validate::validate;
 use crate::config::{CredentialValue, DogmaConfig};
 use crate::error::check_dep;
 use crate::vault;
-use crate::{log_info, log_step};
+use crate::{git, log_info, log_step, log_warn};
 
 pub fn apply(
   repo_root: &Path,
@@ -57,9 +57,20 @@ fn run_infra(
     bail!("unit '{unit}' not found: {}", unit_dir.display());
   }
 
+  // 'apply' records HEAD as the applied state (tag infra-applied/<env>/<unit>),
+  // so the working tree must exactly match HEAD — otherwise the tag would
+  // point at code that differs from what was actually applied.
+  let repo = if subcommand == "apply" {
+    let repo = git::open(repo_root)?;
+    require_clean_tree(&repo)?;
+    Some(repo)
+  } else {
+    None
+  };
+
   let credentials = resolve_credentials(config, env)?;
 
-  log_step!("infra: === init: {unit} ===");
+  log_step!("infra init {unit}");
   run_init(
     config,
     repo_root,
@@ -73,7 +84,7 @@ fn run_infra(
     },
   )?;
 
-  log_step!("infra: === {subcommand}: {unit} ===");
+  log_step!("infra {subcommand} {unit}");
   run_subcommand(
     config,
     repo_root,
@@ -84,6 +95,52 @@ fn run_infra(
     &credentials,
   )?;
 
+  // Record the commit that was just applied so the exact code can be checked
+  // out later (e.g. to destroy resources whose defining code has since
+  // changed). Only apply writes this breadcrumb; failures here are
+  // non-fatal — the infrastructure change already succeeded.
+  if let Some(repo) = &repo {
+    log_step!("infra record applied version {unit}");
+    if let Err(e) = record_applied(repo, env, unit) {
+      log_warn!("infra failed to record applied commit: {e:#}");
+    }
+  }
+
+  Ok(())
+}
+
+/// Bail unless the working tree exactly matches HEAD (no modified, staged, or
+/// untracked files). 'apply' tags HEAD as the applied state, so an uncommitted
+/// change would make that tag lie about what was actually applied.
+fn require_clean_tree(repo: &git2::Repository) -> Result<()> {
+  let dirty = git::dirty_files(repo, true)?;
+  if dirty.is_empty() {
+    return Ok(());
+  }
+  log_warn!("infra working tree has uncommitted changes:");
+  for f in &dirty.files {
+    crate::log::status_line(f.status, &f.path);
+  }
+  bail!(
+    "commit your changes before 'apply' so the recorded version matches what \
+     is deployed"
+  );
+}
+
+/// Force-update a moving tag `infra-applied/<env>/<unit>` to point at the
+/// current HEAD, then push it. This is the breadcrumb that maps an
+/// (env, unit) to the commit last applied to it.
+fn record_applied(
+  repo: &git2::Repository,
+  env: &str,
+  unit: &str,
+) -> Result<()> {
+  let tag = format!("infra-applied/{env}/{unit}");
+  let short = git::head_short_sha(repo)?;
+  log_step!("infra tagging {tag} -> {short}");
+  git::set_moving_tag(repo, &tag)?;
+  log_step!("infra pushing tag {tag} to remotes");
+  git::push_tag_force(repo, &tag)?;
   Ok(())
 }
 
@@ -101,7 +158,7 @@ pub fn resolve_credentials(
     let value = match cred {
       CredentialValue::Static(s) => s.clone(),
       CredentialValue::FromVault { vault_ref, .. } => {
-        log_info!("infra: resolving credential {var_name} ...");
+        log_info!("infra resolving credential {var_name} ...");
         vault::read(config, env, vault_ref)?
       }
     };

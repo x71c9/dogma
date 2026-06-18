@@ -37,13 +37,13 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 0: upfront dependency check — fail before touching anything
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 0: checking dependencies ===");
+  log_step!("deploy [0] checking dependencies");
   check_all_deps()?;
 
   // -----------------------------------------------------------------------
   // Step 1: normalize + validate
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 1: normalize + validate ===");
+  log_step!("deploy [1] normalize + validate");
   let config = normalize(repo_root)?;
   validate(&config)?;
 
@@ -54,9 +54,9 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 2: dirty tree check
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 2: dirty tree check ===");
+  log_step!("deploy [2] dirty tree check");
   let repo = git::open(repo_root)?;
-  let dirty = git::dirty_files(&repo)?;
+  let dirty = git::dirty_files(&repo, false)?;
 
   let original_ref = git::current_ref(&repo)?;
   let mut detached = false;
@@ -66,7 +66,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   let mut created_deploy_commit = false;
 
   if !dirty.is_empty() {
-    log_warn!("deploy: working tree has uncommitted changes:");
+    log_warn!("deploy working tree has uncommitted changes:");
     eprintln!();
     for f in &dirty.files {
       crate::log::status_line(f.status, &f.path);
@@ -79,7 +79,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
     let msg = match &opts.commit_msg {
       Some(m) => {
-        log_info!("deploy: -m flag provided — committing with: {m}");
+        log_info!("deploy -m flag provided — committing with: {m}");
         m.clone()
       }
       None => {
@@ -95,7 +95,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         }
         let suggested = git::suggest_commit_msg(&repo);
         let prompt_msg = if let Some(ref s) = suggested {
-          log_dim!("deploy: suggested message: {s}");
+          log_dim!("deploy suggested message: {s}");
           eprint!(
             "{}commit message (leave blank to accept): ",
             crate::log::prompt_prefix()
@@ -126,26 +126,26 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
     git::commit_all(&repo, &msg)?;
     created_deploy_commit = true;
-    log_info!("deploy: committed: {msg}");
+    log_info!("deploy committed: {msg}");
   }
 
   // -----------------------------------------------------------------------
   // Step 3: resolve version
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 3: resolve version ===");
+  log_step!("deploy [3] resolve version");
 
   let dogma_version = match &opts.mode {
     Mode::New => {
       let v = git::next_version(&repo)?;
-      log_info!("deploy: new version: {v}");
+      log_info!("deploy new version: {v}");
       v
     }
     Mode::Version(tag) => {
       if !git::tag_exists(&repo, tag)? {
         bail!("version tag not found: {tag}");
       }
-      log_info!("deploy: promoting: {tag}");
-      log_info!("deploy: checking out {tag} (detached HEAD) ...");
+      log_info!("deploy promoting: {tag}");
+      log_info!("deploy checking out {tag} (detached HEAD) ...");
       git::checkout_tag(&repo, tag)?;
       detached = true;
       tag.clone()
@@ -158,8 +158,8 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
           opts.env
         )
       })?;
-      log_info!("deploy: latest: {tag}");
-      log_info!("deploy: checking out {tag} (detached HEAD) ...");
+      log_info!("deploy latest: {tag}");
+      log_info!("deploy checking out {tag} (detached HEAD) ...");
       git::checkout_tag(&repo, &tag)?;
       detached = true;
       tag
@@ -172,7 +172,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
           opts.env
         );
       }
-      log_info!("deploy: available versions:");
+      log_info!("deploy available versions:");
       for (i, tag) in tags.iter().enumerate() {
         let marker = if i == 0 { " (latest)" } else { "" };
         eprintln!("  [{}] {tag}{marker}", i + 1);
@@ -195,8 +195,8 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         bail!("selection out of range: {idx}");
       }
       let tag = tags[idx - 1].clone();
-      log_info!("deploy: selected: {tag}");
-      log_info!("deploy: checking out {tag} (detached HEAD) ...");
+      log_info!("deploy selected: {tag}");
+      log_info!("deploy checking out {tag} (detached HEAD) ...");
       git::checkout_tag(&repo, &tag)?;
       detached = true;
       tag
@@ -213,7 +213,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 4: pre-deploy hooks (--new only)
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 4: pre-deploy hooks ===");
+  log_step!("deploy [4] pre-deploy hooks");
 
   let host_list: Vec<String> = match &opts.host {
     Some(h) => {
@@ -237,33 +237,33 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       "",
     )?;
 
-    let hook_dirty = git::dirty_files(&repo)?;
+    let hook_dirty = git::dirty_files(&repo, false)?;
     if !hook_dirty.is_empty() {
       if created_deploy_commit {
         git::amend_all(&repo)?;
-        log_info!("deploy: folded hook changes into deploy commit");
+        log_info!("deploy folded hook changes into deploy commit");
       } else {
         let msg = format!("chore: release {dogma_version}");
         git::commit_all(&repo, &msg)?;
         created_deploy_commit = true;
-        log_info!("deploy: committed: {msg}");
+        log_info!("deploy committed: {msg}");
       }
     } else {
-      log_dim!("deploy: hooks made no tracked changes");
+      log_dim!("deploy hooks made no tracked changes");
     }
   } else {
-    log_dim!("deploy: pre-deploy hooks skipped (promotion)");
+    log_dim!("deploy pre-deploy hooks skipped (promotion)");
   }
 
   // -----------------------------------------------------------------------
   // Step 5: infra cache
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 5: infra cache ===");
+  log_step!("deploy [5] infra cache");
 
   let all_envs: Vec<String> = config.env.clone();
 
   if opts.skip_infra {
-    log_dim!("deploy: --skip-infra: using existing cache");
+    log_dim!("deploy --skip-infra: using existing cache");
     for e in &all_envs {
       let cache = repo_root.join(format!(".dogma/cache/{e}.json"));
       if !cache.exists() {
@@ -293,7 +293,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       if config_needs_infra(&config, e) {
         infra_output::refresh(&config, repo_root, e, None)?;
       } else {
-        log_dim!("deploy: no from:infra refs for {e} — skipping");
+        log_dim!("deploy no from:infra refs for {e} — skipping");
       }
     }
   }
@@ -301,11 +301,11 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 6: generate .sops.yaml
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 6: generate .sops.yaml ===");
+  log_step!("deploy [6] generate .sops.yaml");
 
   if matches!(opts.mode, Mode::New) {
     if opts.skip_sops {
-      log_dim!("deploy: --skip-sops: using existing .sops.yaml");
+      log_dim!("deploy --skip-sops: using existing .sops.yaml");
     } else {
       if opts.refetch {
         let age_dir = repo_root.join(".dogma/age-keys");
@@ -321,13 +321,13 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       sops::generate::run(&config, repo_root, &opts.env, opts.refetch)?;
     }
   } else {
-    log_dim!("deploy: .sops.yaml skipped (promotion)");
+    log_dim!("deploy .sops.yaml skipped (promotion)");
   }
 
   // -----------------------------------------------------------------------
   // Step 7: generate secrets.nix + encrypt secrets
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 7: generate + encrypt secrets ===");
+  log_step!("deploy [7] generate + encrypt secrets");
 
   if matches!(opts.mode, Mode::New) {
     for e in &all_envs {
@@ -337,37 +337,37 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
     let secrets_dir =
       repo_root.join(config.nix.secrets.trim_start_matches("./"));
-    let secret_dirty = git::dirty_files(&repo)?;
+    let secret_dirty = git::dirty_files(&repo, false)?;
     if !secret_dirty.is_empty() {
       if created_deploy_commit {
         git::amend_all(&repo)?;
-        log_info!("deploy: folded encrypted secrets into deploy commit");
+        log_info!("deploy folded encrypted secrets into deploy commit");
       } else {
         // Last stage that can commit — no need to update the flag.
         git::commit_all(
           &repo,
           "chore(secrets): update encrypted secrets (all envs)",
         )?;
-        log_info!("deploy: committed secrets");
+        log_info!("deploy committed secrets");
       }
     } else {
-      log_dim!("deploy: secrets unchanged — nothing to commit");
+      log_dim!("deploy secrets unchanged — nothing to commit");
     }
     drop(secrets_dir);
   } else {
-    log_info!("deploy: verifying committed secrets ...");
+    log_info!("deploy verifying committed secrets ...");
     verify_secrets_committed(&config, repo_root, &opts.env)?;
   }
 
   // -----------------------------------------------------------------------
   // Step 8: per-host deploy
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 8: deploy ===");
+  log_step!("deploy [8] deploy");
 
   let mut deployed_targets: Vec<String> = Vec::new();
 
   for host in &host_list {
-    log_step!("deploy: --- host: {host} ---");
+    log_step!("deploy host {host}");
     let target = deploy_host(&config, repo_root, host, &opts.env)?;
     deployed_targets.push(target);
   }
@@ -375,7 +375,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 9: git tags + push
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 9: release tag ===");
+  log_step!("deploy [9] release tag");
   release_tag(
     &repo,
     &dogma_version,
@@ -387,7 +387,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 10: post-deploy hooks
   // -----------------------------------------------------------------------
-  log_step!("deploy: === step 10: post-deploy hooks ===");
+  log_step!("deploy [10] post-deploy hooks");
   let dogma_deployed_ips = deployed_targets.join("\n");
   run_hooks(
     "post-deploy",
@@ -399,10 +399,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
     &dogma_deployed_ips,
   )?;
 
-  log_step!(
-    "deploy: === deploy complete: {} ({dogma_version}) ===",
-    opts.env
-  );
+  log_step!("deploy complete {} ({dogma_version})", opts.env);
   Ok(())
 }
 
@@ -420,7 +417,7 @@ fn run_hooks(
   deployed_ips: &str,
 ) -> Result<()> {
   if hooks.is_empty() {
-    log_dim!("deploy: no hooks.{hook_name} defined — skipping");
+    log_dim!("deploy no hooks.{hook_name} defined — skipping");
     return Ok(());
   }
   for hook in hooks {
@@ -428,7 +425,7 @@ fn run_hooks(
     if !hook_path.exists() {
       bail!("hook not found: {hook}");
     }
-    log_info!("deploy: running {hook_name} hook: {hook}");
+    log_info!("deploy running {hook_name} hook: {hook}");
     let status = Command::new(&hook_path)
       .env("DOGMA_VERSION", version)
       .env("DOGMA_ENV", env)
@@ -521,7 +518,7 @@ fn encrypt_secrets(
           let out_file = out_dir.join(format!("{group}.yaml"));
 
           log_info!(
-            "deploy: encrypting {host_name}/{env}/{group} → {}",
+            "deploy encrypting {host_name}/{env}/{group} → {}",
             out_file.display()
           );
 
@@ -581,7 +578,7 @@ fn verify_secrets_committed(
       }
     }
   }
-  log_info!("deploy: all secrets committed — ok");
+  log_info!("deploy all secrets committed — ok");
   Ok(())
 }
 
@@ -607,7 +604,7 @@ fn deploy_host(
     }
   };
 
-  log_info!("deploy: {host}/{env} → {host_ip}");
+  log_info!("deploy {host}/{env} → {host_ip}");
 
   let host_user = &machine.user;
   let hostname = machine.hostname.get(env, host);
@@ -620,10 +617,10 @@ fn deploy_host(
     .map(|o| o.status.success())
     .unwrap_or(false)
   {
-    log_dim!("deploy: passwordless sudo available");
+    log_dim!("deploy passwordless sudo available");
     "--sudo"
   } else {
-    log_info!("deploy: will prompt for sudo password");
+    log_info!("deploy will prompt for sudo password");
     "--ask-sudo-password"
   };
 
@@ -635,7 +632,7 @@ fn deploy_host(
       )?;
 
       log_info!(
-                "deploy: nixos-rebuild switch --flake {}#{hostname} --target-host {host_user}@{host_ip} {sudo_flag}",
+                "deploy nixos-rebuild switch --flake {}#{hostname} --target-host {host_user}@{host_ip} {sudo_flag}",
                 flake_path.display()
             );
 
@@ -660,7 +657,7 @@ fn deploy_host(
     }
   }
 
-  log_info!("deploy: done: {env}/{host}");
+  log_info!("deploy done: {env}/{host}");
   Ok(format!("{host_user}@{host_ip}"))
 }
 
@@ -691,15 +688,15 @@ fn release_tag(
     if git::tag_exists(repo, version)? {
       bail!("tag '{version}' already exists");
     }
-    log_info!("deploy: creating annotated tag {version}");
+    log_info!("deploy creating annotated tag {version}");
     git::create_annotated_tag(repo, version, &tag_msg)?;
     git::push_tag(repo, version)?;
   }
 
   if git::tag_exists(repo, &deployed_tag)? {
-    log_dim!("deploy: tag '{deployed_tag}' already exists — skipping");
+    log_dim!("deploy tag '{deployed_tag}' already exists — skipping");
   } else {
-    log_info!("deploy: creating tag {deployed_tag}");
+    log_info!("deploy creating tag {deployed_tag}");
     git::create_lightweight_tag(repo, &deployed_tag)?;
     git::push_tag(repo, &deployed_tag)?;
   }
@@ -746,7 +743,7 @@ impl Drop for DetachGuard<'_> {
     if self.detached {
       if let Ok(repo) = git::open(self.repo_root) {
         let _ = git::restore_ref(&repo, &self.original_ref);
-        log_info!("deploy: restored branch: {}", self.original_ref);
+        log_info!("deploy restored branch: {}", self.original_ref);
       }
     }
   }

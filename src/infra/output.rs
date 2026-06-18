@@ -49,7 +49,7 @@ pub fn refresh(
   };
 
   for unit in &units {
-    log_info!("infra: fetching outputs: {unit} ...");
+    log_info!("infra fetching outputs: {unit} ...");
     let flat = fetch_unit_outputs(cli, &infra_dir.join(unit), &credentials)?;
     merged[unit] = flat;
   }
@@ -57,7 +57,7 @@ pub fn refresh(
   std::fs::write(&cache_file, serde_json::to_string_pretty(&merged)?)
     .with_context(|| format!("failed to write {}", cache_file.display()))?;
 
-  log_dim!("infra: cache written: {}", cache_file.display());
+  log_dim!("infra cache written: {}", cache_file.display());
   Ok(())
 }
 

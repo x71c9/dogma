@@ -45,7 +45,7 @@ pub fn generate(
     std::fs::write(&out_file, &content)
       .with_context(|| format!("failed to write {}", out_file.display()))?;
 
-    log_dim!("secrets: written: {}", out_file.display());
+    log_dim!("secrets written: {}", out_file.display());
   }
 
   Ok(())
