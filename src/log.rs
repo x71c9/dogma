@@ -18,31 +18,13 @@ const YELLOW: &str = "\x1b[33m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
-/// Splits a leading "subsystem: " off a message, returning (tag, rest).
-/// A tag is the leading run of word/`-` chars immediately followed by ": ".
-/// Messages without that shape yield `(None, whole message)`.
-fn split_tag(msg: &str) -> (Option<&str>, &str) {
-  if let Some((head, rest)) = msg.split_once(": ") {
-    if !head.is_empty()
-      && head
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-      return (Some(head), rest);
-    }
-  }
-  (None, msg)
-}
-
-/// Renders "[dogma] [tag] rest" (or "[dogma] rest" when `tag` is None) with the
-/// whole line wrapped in `color`. The leading "subsystem: " in the message is
-/// always stripped — it is no longer shown as a tag. `color` empty (or colors
-/// disabled) prints uncolored.
+/// Renders "[dogma] [tag] msg" (or "[dogma] msg" when `tag` is None) with the
+/// whole line wrapped in `color`. The message is printed verbatim. `color`
+/// empty (or colors disabled) prints uncolored.
 fn emit(color: &str, tag: Option<&str>, msg: &str) {
-  let (_subsystem, rest) = split_tag(msg);
   let line = match tag {
-    Some(t) => format!("[dogma] [{t}] {rest}"),
-    None => format!("[dogma] {rest}"),
+    Some(t) => format!("[dogma] [{t}] {msg}"),
+    None => format!("[dogma] {msg}"),
   };
   if colors_enabled() && !color.is_empty() {
     eprintln!("{color}{line}{RESET}");

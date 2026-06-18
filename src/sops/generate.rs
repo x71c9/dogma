@@ -51,7 +51,7 @@ pub fn run(
         Ok(ip) => ip,
         Err(e) => {
           log_warn!(
-            "sops: {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
+            "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
           );
           continue;
         }
@@ -59,20 +59,24 @@ pub fn run(
 
       let cache_file = age_keys_dir.join(format!("{hostname}.pub"));
       let host_age = if !refetch && cache_file.exists() {
-        log_dim!("sops: {host_name}: using cached age key");
+        log_dim!("sops {host_name}: using cached age key");
         std::fs::read_to_string(&cache_file)?.trim().to_string()
       } else {
         match fetch_age_key(&ip, &hostname, &cache_file) {
           Ok(k) => k,
           Err(e) => {
-            log_warn!("sops: {host_name}/{env_name}: cannot fetch age key — skipping ({e})");
+            log_warn!("sops {host_name}/{env_name}: cannot fetch age key — skipping ({e})");
             continue;
           }
         }
       };
 
-      let path_regex =
-        format!("{}/{}/.*\\.yaml$", secrets_rel.display(), hostname);
+      let path_regex = format!(
+        "{}/{}/{}/.*\\.yaml$",
+        secrets_rel.display(),
+        env_name,
+        host_name
+      );
 
       rules.push_str(&format!("\n  - path_regex: {path_regex}"));
 
@@ -84,7 +88,7 @@ pub fn run(
       all_age.push(host_age);
       rules.push_str(&format!("\n    age: {}", all_age.join(",")));
 
-      log_info!("sops: {host_name}/{env_name} → {hostname}");
+      log_info!("sops {host_name}/{env_name} → {hostname}");
     }
   }
 
@@ -92,7 +96,7 @@ pub fn run(
   std::fs::write(&sops_file, format!("{rules}\n"))
     .with_context(|| format!("failed to write {}", sops_file.display()))?;
 
-  log_dim!("sops: written: {}", sops_file.display());
+  log_dim!("sops written: {}", sops_file.display());
   Ok(())
 }
 
@@ -165,7 +169,7 @@ fn fetch_age_key(
   hostname: &str,
   cache_file: &Path,
 ) -> Result<String> {
-  log_info!("sops: {hostname}: fetching SSH host key from {ip} ...");
+  log_info!("sops {hostname}: fetching SSH host key from {ip} ...");
 
   let out = Command::new("ssh-keyscan")
     .args(["-t", "ed25519", "-T", "10", ip])
@@ -213,6 +217,6 @@ fn fetch_age_key(
     format!("failed to cache age key: {}", cache_file.display())
   })?;
 
-  log_dim!("sops: {hostname}: age key cached");
+  log_dim!("sops {hostname}: age key cached");
   Ok(age_key)
 }

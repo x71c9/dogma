@@ -1,6 +1,6 @@
 /// secrets.rs — mirrors generate-machine-secrets.sh
 ///
-/// Writes nix/secrets/<hostname>/secrets.nix for each machine in the given env,
+/// Writes nix/secrets/<env>/<machine>/secrets.nix for each machine in the given env,
 /// listing every group/field pair from dogma.yml.
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -17,8 +17,7 @@ pub fn generate(
   let secrets_dir = repo_root.join(nix_secrets);
 
   for (machine_name, machine) in &config.machines {
-    let hostname = machine.hostname.get(env, machine_name);
-    let out_dir = secrets_dir.join(&hostname);
+    let out_dir = secrets_dir.join(env).join(machine_name);
     std::fs::create_dir_all(&out_dir)?;
 
     let out_file = out_dir.join("secrets.nix");
@@ -45,7 +44,7 @@ pub fn generate(
     std::fs::write(&out_file, &content)
       .with_context(|| format!("failed to write {}", out_file.display()))?;
 
-    log_dim!("secrets: written: {}", out_file.display());
+    log_dim!("secrets written: {}", out_file.display());
   }
 
   Ok(())

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use git2::Repository;
 use std::path::Path;
 
@@ -43,28 +43,26 @@ fn status_char(s: git2::Status) -> char {
   }
 }
 
-/// Returns tracked modified/staged files (excludes untracked).
-pub fn dirty_files(repo: &Repository) -> Result<DirtyFiles> {
+/// Returns paths with a pending change relative to HEAD. When
+/// `include_untracked` is false only tracked modifications are reported
+/// (the usual "dirty tree" notion); when true, untracked files are included
+/// too — used to guarantee the working tree exactly matches the committed
+/// code before recording HEAD as the applied state. Git-ignored files are
+/// always excluded.
+pub fn dirty_files(
+  repo: &Repository,
+  include_untracked: bool,
+) -> Result<DirtyFiles> {
   let mut opts = git2::StatusOptions::new();
   opts
-    .include_untracked(false)
+    .include_untracked(include_untracked)
     .include_ignored(false)
     .exclude_submodules(true);
 
   let statuses = repo.statuses(Some(&mut opts))?;
   let files = statuses
     .iter()
-    .filter(|e| {
-      let s = e.status();
-      s.intersects(
-        git2::Status::INDEX_NEW
-          | git2::Status::INDEX_MODIFIED
-          | git2::Status::INDEX_DELETED
-          | git2::Status::INDEX_RENAMED
-          | git2::Status::WT_MODIFIED
-          | git2::Status::WT_DELETED,
-      )
-    })
+    .filter(|e| !e.status().is_empty())
     .filter_map(|e| {
       e.path().map(|p| DirtyFile {
         status: status_char(e.status()),
@@ -184,20 +182,34 @@ pub fn create_lightweight_tag(repo: &Repository, name: &str) -> Result<()> {
   Ok(())
 }
 
+/// Create or move a lightweight tag to current HEAD, overwriting any existing
+/// tag of the same name. Used for moving "pointer" tags (e.g. last-applied
+/// markers) rather than immutable release tags.
+pub fn set_moving_tag(repo: &Repository, name: &str) -> Result<()> {
+  let head = repo.head()?.peel_to_commit()?;
+  repo
+    .tag_lightweight(name, head.as_object(), true)
+    .with_context(|| format!("failed to set tag '{name}'"))?;
+  Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Checkout / restore
 // ---------------------------------------------------------------------------
+
+/// The abbreviated (7-char) hex sha of the current HEAD commit.
+pub fn head_short_sha(repo: &Repository) -> Result<String> {
+  let sha = repo.head()?.peel_to_commit()?.id().to_string();
+  Ok(sha[..sha.len().min(7)].to_string())
+}
 
 pub fn current_ref(repo: &Repository) -> Result<String> {
   match repo.head() {
     Ok(head) if head.is_branch() => {
       Ok(head.shorthand().unwrap_or("HEAD").to_string())
     }
-    _ => {
-      // detached HEAD — use short sha
-      let oid = repo.head()?.peel_to_commit()?.id();
-      Ok(oid.to_string()[..7].to_string())
-    }
+    // detached HEAD — use short sha
+    _ => head_short_sha(repo),
   }
 }
 
@@ -239,19 +251,60 @@ pub fn restore_ref(repo: &Repository, ref_name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn push_commits(repo: &Repository) -> Result<()> {
-  push_refspec(repo, "HEAD")
+  // Push HEAD to its branch by name. A bare "HEAD" refspec is ambiguous on a
+  // normal remote (`git push origin HEAD` can't tell which branch to update)
+  // and is rejected; `HEAD:refs/heads/<branch>` is explicit and works across
+  // gcrypt/ssh/https alike.
+  let head = repo.head()?;
+  if !head.is_branch() {
+    bail!(
+      "HEAD is detached — refusing to push commits without a branch to push to"
+    );
+  }
+  let branch = head.shorthand().ok_or_else(|| {
+    anyhow::anyhow!("could not determine current branch name")
+  })?;
+  push_refspec(repo, &format!("HEAD:refs/heads/{branch}"))
 }
 
 pub fn push_tag(repo: &Repository, tag_name: &str) -> Result<()> {
   push_refspec(repo, &format!("refs/tags/{tag_name}"))
 }
 
+/// Force-push a tag to every remote, allowing it to move (overwrite). Used for
+/// moving "pointer" tags whose target changes over time.
+pub fn push_tag_force(repo: &Repository, tag_name: &str) -> Result<()> {
+  push_refspec(repo, &format!("+refs/tags/{tag_name}"))
+}
+
+/// Push a refspec to every remote.
+///
+/// Shells out to the system `git` rather than using libgit2: libgit2 only
+/// supports its built-in transports and cannot push remote-helper URLs (e.g.
+/// `gcrypt::rsync://...`) or SSH unless built with libssh2. The `git` binary
+/// honours remote helpers and the user's ssh-agent. Failures are collected so
+/// one unreachable remote still reports the others.
 fn push_refspec(repo: &Repository, refspec: &str) -> Result<()> {
+  let workdir = repo
+    .workdir()
+    .ok_or_else(|| anyhow::anyhow!("repository has no working directory"))?;
+
+  let mut failures = Vec::new();
   for remote_name in repo.remotes()?.iter().flatten() {
-    let mut remote = repo.find_remote(remote_name)?;
-    remote.push(&[refspec], None).with_context(|| {
-      format!("failed to push '{refspec}' to remote '{remote_name}'")
-    })?;
+    let status = std::process::Command::new("git")
+      .current_dir(workdir)
+      .args(["push", remote_name, refspec])
+      .status();
+    match status {
+      Ok(s) if s.success() => {}
+      Ok(s) => failures
+        .push(format!("{remote_name} (exit {})", s.code().unwrap_or(-1))),
+      Err(e) => failures.push(format!("{remote_name} ({e})")),
+    }
+  }
+
+  if !failures.is_empty() {
+    bail!("failed to push '{refspec}' to: {}", failures.join(", "));
   }
   Ok(())
 }
