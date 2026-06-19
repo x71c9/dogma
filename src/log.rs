@@ -15,6 +15,7 @@ const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 const BLUE: &str = "\x1b[34m";
 const YELLOW: &str = "\x1b[33m";
+const CYAN: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
@@ -73,6 +74,15 @@ pub fn status_line(status: char, path: &str) {
 /// `eprint!` so prompts match the bracketed style of info lines.
 pub fn prompt_prefix() -> String {
   "[dogma] ".to_string()
+}
+
+/// Wraps `s` in cyan ANSI codes when colors are enabled; returns `s` unchanged otherwise.
+pub fn cyan(s: &str) -> String {
+  if colors_enabled() {
+    format!("{CYAN}{s}{RESET}")
+  } else {
+    s.to_string()
+  }
 }
 
 /// Fatal error: whole line red, rendered as "[dogma] [error] <msg>".

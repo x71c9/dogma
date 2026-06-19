@@ -117,6 +117,9 @@ pub enum InfraCommands {
     /// Pass -migrate-state to tofu init instead of -reconfigure
     #[arg(long)]
     migrate_state: bool,
+    /// Commit message for dirty tree (skips interactive prompt)
+    #[arg(short = 'm', long)]
+    message: Option<String>,
   },
   /// Normalize, validate, init, then run tofu destroy
   Destroy {

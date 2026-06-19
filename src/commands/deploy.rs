@@ -99,7 +99,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         }
         let suggested = git::suggest_commit_msg(&repo);
         let prompt_msg = if let Some(ref s) = suggested {
-          log_dim!("deploy suggested message: {s}");
+          log_info!("deploy suggested message: {}", crate::log::cyan(s));
           eprint!(
             "{}commit message (leave blank to accept): ",
             crate::log::prompt_prefix()
