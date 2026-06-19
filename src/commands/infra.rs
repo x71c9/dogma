@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,10 +15,19 @@ pub fn apply(
   env: &str,
   unit: &str,
   migrate_state: bool,
+  commit_msg: Option<String>,
 ) -> Result<()> {
   let config = normalize(repo_root)?;
   validate(&config)?;
-  run_infra(&config, repo_root, env, unit, migrate_state, "apply")
+  run_infra(
+    &config,
+    repo_root,
+    env,
+    unit,
+    migrate_state,
+    "apply",
+    commit_msg,
+  )
 }
 
 pub fn destroy(
@@ -28,7 +38,15 @@ pub fn destroy(
 ) -> Result<()> {
   let config = normalize(repo_root)?;
   validate(&config)?;
-  run_infra(&config, repo_root, env, unit, migrate_state, "destroy")
+  run_infra(
+    &config,
+    repo_root,
+    env,
+    unit,
+    migrate_state,
+    "destroy",
+    None,
+  )
 }
 
 fn run_infra(
@@ -38,6 +56,7 @@ fn run_infra(
   unit: &str,
   migrate_state: bool,
   subcommand: &str,
+  commit_msg: Option<String>,
 ) -> Result<()> {
   if !config.env.contains(&env.to_string()) {
     bail!("env '{env}' is not declared in dogma.yml");
@@ -57,12 +76,12 @@ fn run_infra(
     bail!("unit '{unit}' not found: {}", unit_dir.display());
   }
 
-  // 'apply' records HEAD as the applied state (tag infra-applied/<env>/<unit>),
-  // so the working tree must exactly match HEAD — otherwise the tag would
-  // point at code that differs from what was actually applied.
+  // 'apply' records HEAD as the applied state (tag infra-applied/<env>/<unit>).
+  // The working tree must match HEAD before we run — offer to commit dirty
+  // changes rather than refusing outright (mirrors `dogma deploy --new`).
   let repo = if subcommand == "apply" {
     let repo = git::open(repo_root)?;
-    require_clean_tree(&repo)?;
+    maybe_commit_dirty(&repo, commit_msg)?;
     Some(repo)
   } else {
     None
@@ -95,6 +114,20 @@ fn run_infra(
     &credentials,
   )?;
 
+  // Cache this unit's outputs now that apply succeeded: they exist in remote
+  // state, so `dogma output`/`env`/`deploy` can read them without a separate
+  // run. refresh merges into .dogma/cache/<env>.json, preserving other units'
+  // cached values. Only apply caches; failures here are non-fatal — the infra
+  // change already succeeded.
+  if subcommand == "apply" {
+    log_step!("infra cache outputs {unit}");
+    if let Err(e) =
+      crate::infra::output::refresh(config, repo_root, env, Some(unit))
+    {
+      log_warn!("infra failed to cache outputs: {e:#}");
+    }
+  }
+
   // Record the commit that was just applied so the exact code can be checked
   // out later (e.g. to destroy resources whose defining code has since
   // changed). Only apply writes this breadcrumb; failures here are
@@ -109,22 +142,75 @@ fn run_infra(
   Ok(())
 }
 
-/// Bail unless the working tree exactly matches HEAD (no modified, staged, or
-/// untracked files). 'apply' tags HEAD as the applied state, so an uncommitted
-/// change would make that tag lie about what was actually applied.
-fn require_clean_tree(repo: &git2::Repository) -> Result<()> {
+/// Offer to commit dirty changes before 'apply'. The infra-applied tag must
+/// point at the exact code that was applied; an uncommitted change would make
+/// it lie. If the user declines, bail — they must clean up themselves.
+fn maybe_commit_dirty(
+  repo: &git2::Repository,
+  commit_msg: Option<String>,
+) -> Result<()> {
   let dirty = git::dirty_files(repo, true)?;
   if dirty.is_empty() {
     return Ok(());
   }
+
   log_warn!("infra working tree has uncommitted changes:");
+  eprintln!();
   for f in &dirty.files {
     crate::log::status_line(f.status, &f.path);
   }
-  bail!(
-    "commit your changes before 'apply' so the recorded version matches what \
-     is deployed"
-  );
+  eprintln!();
+
+  let msg = match commit_msg {
+    Some(m) => {
+      log_info!("infra -m flag provided — committing with: {m}");
+      m
+    }
+    None => {
+      eprint!(
+        "{}commit these changes before applying? [Y/n] ",
+        crate::log::prompt_prefix()
+      );
+      io::stderr().flush()?;
+      let mut answer = String::new();
+      io::stdin().read_line(&mut answer)?;
+      if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
+        bail!("aborted — commit or stash your changes and re-run");
+      }
+      let suggested = git::suggest_commit_msg(repo);
+      let prompt_msg = if let Some(ref s) = suggested {
+        log_info!("infra suggested message: {}", crate::log::cyan(s));
+        eprint!(
+          "{}commit message (leave blank to accept): ",
+          crate::log::prompt_prefix()
+        );
+        io::stderr().flush()?;
+        let mut m = String::new();
+        io::stdin().read_line(&mut m)?;
+        let m = m.trim().to_string();
+        if m.is_empty() {
+          s.clone()
+        } else {
+          m
+        }
+      } else {
+        eprint!("{}commit message: ", crate::log::prompt_prefix());
+        io::stderr().flush()?;
+        let mut m = String::new();
+        io::stdin().read_line(&mut m)?;
+        m.trim().to_string()
+      };
+      if prompt_msg.is_empty() {
+        "chore: pre-infra snapshot".to_string()
+      } else {
+        prompt_msg
+      }
+    }
+  };
+
+  git::commit_all(repo, &msg)?;
+  log_info!("infra committed: {msg}");
+  Ok(())
 }
 
 /// Force-update a moving tag `infra-applied/<env>/<unit>` to point at the

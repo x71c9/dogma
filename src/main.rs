@@ -152,8 +152,15 @@ fn run() -> Result<()> {
         env,
         unit,
         migrate_state,
+        message,
       } => {
-        commands::infra::apply(&repo_root, &env, &unit, migrate_state)?;
+        commands::infra::apply(
+          &repo_root,
+          &env,
+          &unit,
+          migrate_state,
+          message,
+        )?;
       }
       InfraCommands::Destroy {
         env,
