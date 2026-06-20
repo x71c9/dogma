@@ -14,6 +14,8 @@ use crate::error::check_dep;
 use crate::infra::output::{read_cached, resolve_infra_credentials};
 use crate::{log_dim, log_info, log_warn};
 
+type EnvCreds = (String, Vec<(String, String)>);
+
 /// `env_creds` — if supplied, pre-resolved credentials per env (avoids
 /// redundant vault reads when the caller has already resolved them for
 /// the same envs). Pass `None` to resolve internally.
@@ -22,7 +24,7 @@ pub fn run(
   repo_root: &Path,
   _env: &str,
   refetch: bool,
-  env_creds: Option<&[(String, Vec<(String, String)>)]>,
+  env_creds: Option<&[EnvCreds]>,
 ) -> Result<()> {
   check_dep("ssh-keyscan", "install openssh")?;
   check_dep(
@@ -63,21 +65,16 @@ pub fn run(
     for (host_name, machine) in &config.machines {
       let hostname = machine.hostname.get(env_name, host_name);
 
-      let ip = match resolve_ip(
-        config,
-        repo_root,
-        host_name,
-        env_name,
-        &infra_creds,
-      ) {
-        Ok(ip) => ip,
-        Err(e) => {
-          log_warn!(
-            "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
-          );
-          continue;
-        }
-      };
+      let ip =
+        match resolve_ip(config, repo_root, host_name, env_name, infra_creds) {
+          Ok(ip) => ip,
+          Err(e) => {
+            log_warn!(
+              "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
+            );
+            continue;
+          }
+        };
 
       let cache_file = age_keys_dir.join(format!("{hostname}.pub"));
       let host_age = if !refetch && cache_file.exists() {

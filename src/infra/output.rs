@@ -77,11 +77,11 @@ pub fn refresh_with_creds(
       env,
       unit,
       false,
-      &credentials,
+      credentials,
     )?;
 
     log_info!("infra fetching outputs: {unit} ...");
-    let flat = fetch_unit_outputs(cli, &unit_dir, &credentials)?;
+    let flat = fetch_unit_outputs(cli, &unit_dir, credentials)?;
     merged[unit] = flat;
   }
 
@@ -172,10 +172,8 @@ fn fetch_sensitive_output(
     bail!("'{cli} output -raw {output}' failed: {stderr}");
   }
 
-  Ok(
-    String::from_utf8(out.stdout)
-      .with_context(|| format!("output '{output}' returned non-UTF-8 bytes"))?,
-  )
+  String::from_utf8(out.stdout)
+    .with_context(|| format!("output '{output}' returned non-UTF-8 bytes"))
 }
 
 fn fetch_unit_outputs(

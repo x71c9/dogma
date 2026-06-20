@@ -565,7 +565,7 @@ fn encrypt_secrets(
                   env,
                   unit,
                   output,
-                  &infra_creds,
+                  infra_creds,
                 )?
               }
             };
