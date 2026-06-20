@@ -7,6 +7,8 @@ use crate::config::DogmaConfig;
 use crate::error::check_dep;
 use crate::{log_dim, log_info};
 
+const SENSITIVE_SENTINEL: &str = "__dogma_sensitive__";
+
 /// Refresh the infra output cache for one env (all units, or one unit).
 /// Writes .dogma/cache/<env>.json.
 pub fn refresh(
@@ -14,6 +16,19 @@ pub fn refresh(
   repo_root: &Path,
   env: &str,
   unit_filter: Option<&str>,
+) -> Result<()> {
+  let credentials = resolve_credentials(config, env)?;
+  refresh_with_creds(config, repo_root, env, unit_filter, &credentials)
+}
+
+/// Like `refresh` but accepts pre-resolved credentials to avoid redundant vault
+/// reads when the caller has already resolved them for this env.
+pub fn refresh_with_creds(
+  config: &DogmaConfig,
+  repo_root: &Path,
+  env: &str,
+  unit_filter: Option<&str>,
+  credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config
     .infra
@@ -24,7 +39,6 @@ pub fn refresh(
   check_dep(cli, &format!("install {cli} and make sure it is on PATH"))?;
 
   let infra_dir = repo_root.join(infra.path.trim_start_matches("./"));
-  let credentials = resolve_credentials(config, env)?;
 
   let units = match unit_filter {
     Some(u) => {
@@ -63,11 +77,11 @@ pub fn refresh(
       env,
       unit,
       false,
-      &credentials,
+      credentials,
     )?;
 
     log_info!("infra fetching outputs: {unit} ...");
-    let flat = fetch_unit_outputs(cli, &unit_dir, &credentials)?;
+    let flat = fetch_unit_outputs(cli, &unit_dir, credentials)?;
     merged[unit] = flat;
   }
 
@@ -78,12 +92,24 @@ pub fn refresh(
   Ok(())
 }
 
-/// Read one output value from the cache (or bail if missing).
+/// Resolve infra credentials once and return them for reuse across multiple
+/// `read_cached` calls within the same operation.
+pub fn resolve_infra_credentials(
+  config: &DogmaConfig,
+  env: &str,
+) -> Result<Vec<(String, String)>> {
+  resolve_credentials(config, env)
+}
+
+/// Read one output value from the cache, fetching sensitive outputs live.
+/// Pass pre-resolved `credentials` to avoid re-reading vault on every call.
 pub fn read_cached(
+  config: &DogmaConfig,
   repo_root: &Path,
   env: &str,
   unit: &str,
   output: &str,
+  credentials: &[(String, String)],
 ) -> Result<String> {
   let cache_file = repo_root.join(format!(".dogma/cache/{env}.json"));
   if !cache_file.exists() {
@@ -95,14 +121,59 @@ pub fn read_cached(
   let raw = std::fs::read_to_string(&cache_file)?;
   let cache: serde_json::Value = serde_json::from_str(&raw)?;
 
-  cache[unit][output]
-    .as_str()
-    .map(str::to_string)
-    .ok_or_else(|| {
-      anyhow::anyhow!(
-        "output '{output}' not found in unit '{unit}' for env '{env}'"
-      )
-    })
+  let entry = &cache[unit][output];
+
+  // Sensitive outputs are stored as a sentinel; fetch their value live.
+  if entry.get("__dogma_sensitive__").and_then(|v| v.as_bool()) == Some(true) {
+    return fetch_sensitive_output(
+      config,
+      repo_root,
+      unit,
+      output,
+      credentials,
+    );
+  }
+
+  entry.as_str().map(str::to_string).ok_or_else(|| {
+    anyhow::anyhow!(
+      "output '{output}' not found in unit '{unit}' for env '{env}'"
+    )
+  })
+}
+
+fn fetch_sensitive_output(
+  config: &DogmaConfig,
+  repo_root: &Path,
+  unit: &str,
+  output: &str,
+  credentials: &[(String, String)],
+) -> Result<String> {
+  let infra = config
+    .infra
+    .as_ref()
+    .ok_or_else(|| anyhow::anyhow!("no 'infra' block in dogma.yml"))?;
+
+  let cli = &infra.cli;
+  let unit_dir = repo_root
+    .join(infra.path.trim_start_matches("./"))
+    .join(unit);
+
+  log_dim!("infra output '{output}' is sensitive — fetching live via {cli}");
+
+  let out = Command::new(cli)
+    .current_dir(&unit_dir)
+    .args(["output", "-raw", output])
+    .envs(credentials.iter().cloned())
+    .output()
+    .with_context(|| format!("failed to run '{cli} output -raw {output}'"))?;
+
+  if !out.status.success() {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    bail!("'{cli} output -raw {output}' failed: {stderr}");
+  }
+
+  String::from_utf8(out.stdout)
+    .with_context(|| format!("output '{output}' returned non-UTF-8 bytes"))
 }
 
 fn fetch_unit_outputs(
@@ -125,13 +196,20 @@ fn fetch_unit_outputs(
   let raw: serde_json::Value = serde_json::from_slice(&out.stdout)
     .context("tofu output was not valid JSON")?;
 
-  // Flatten: keep only non-sensitive outputs, extract .value
+  // Flatten outputs: extract .value for non-sensitive ones, store a sentinel
+  // for sensitive ones so read_cached can fetch them live via `tofu output -raw`.
   let flat = raw
     .as_object()
     .map(|m| {
       m.iter()
-        .filter(|(_, v)| v["sensitive"] != serde_json::json!(true))
-        .map(|(k, v)| (k.clone(), v["value"].clone()))
+        .map(|(k, v)| {
+          let val = if v["sensitive"] == serde_json::json!(true) {
+            serde_json::json!({ SENSITIVE_SENTINEL: true })
+          } else {
+            v["value"].clone()
+          };
+          (k.clone(), val)
+        })
         .collect::<serde_json::Map<_, _>>()
     })
     .unwrap_or_default();

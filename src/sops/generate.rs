@@ -11,14 +11,20 @@ use std::process::Command;
 
 use crate::config::{AdminKey, DogmaConfig, IpEntry, IpField};
 use crate::error::check_dep;
-use crate::infra::output::read_cached;
+use crate::infra::output::{read_cached, resolve_infra_credentials};
 use crate::{log_dim, log_info, log_warn};
 
+type EnvCreds = (String, Vec<(String, String)>);
+
+/// `env_creds` — if supplied, pre-resolved credentials per env (avoids
+/// redundant vault reads when the caller has already resolved them for
+/// the same envs). Pass `None` to resolve internally.
 pub fn run(
   config: &DogmaConfig,
   repo_root: &Path,
   _env: &str,
   refetch: bool,
+  env_creds: Option<&[EnvCreds]>,
 ) -> Result<()> {
   check_dep("ssh-keyscan", "install openssh")?;
   check_dep(
@@ -43,19 +49,32 @@ pub fn run(
 
   let mut rules = String::from("creation_rules:");
 
-  for (host_name, machine) in &config.machines {
-    for env_name in &all_envs {
+  for env_name in &all_envs {
+    let owned_creds;
+    let infra_creds: &[(String, String)] = match env_creds {
+      Some(map) => map
+        .iter()
+        .find(|(e, _)| e == env_name)
+        .map(|(_, c)| c.as_slice())
+        .unwrap_or(&[]),
+      None => {
+        owned_creds = resolve_infra_credentials(config, env_name)?;
+        &owned_creds
+      }
+    };
+    for (host_name, machine) in &config.machines {
       let hostname = machine.hostname.get(env_name, host_name);
 
-      let ip = match resolve_ip(config, repo_root, host_name, env_name) {
-        Ok(ip) => ip,
-        Err(e) => {
-          log_warn!(
-            "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
-          );
-          continue;
-        }
-      };
+      let ip =
+        match resolve_ip(config, repo_root, host_name, env_name, infra_creds) {
+          Ok(ip) => ip,
+          Err(e) => {
+            log_warn!(
+              "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
+            );
+            continue;
+          }
+        };
 
       let cache_file = age_keys_dir.join(format!("{hostname}.pub"));
       let host_age = if !refetch && cache_file.exists() {
@@ -143,6 +162,7 @@ fn resolve_ip(
   repo_root: &Path,
   host_name: &str,
   env: &str,
+  infra_creds: &[(String, String)],
 ) -> Result<String> {
   let machine = config
     .machines
@@ -159,7 +179,7 @@ fn resolve_ip(
   match ip_entry {
     IpEntry::Static(ip) => Ok(ip.clone()),
     IpEntry::FromInfra { unit, output, .. } => {
-      read_cached(repo_root, env, unit, output)
+      read_cached(config, repo_root, env, unit, output, infra_creds)
     }
   }
 }

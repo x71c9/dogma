@@ -364,13 +364,26 @@ pub fn suggest_commit_msg(repo: &Repository) -> Option<String> {
 
 fn infer_type(files: &[String]) -> &'static str {
   for f in files {
-    if f.contains("test") || f.contains("spec") {
+    let fname = std::path::Path::new(f)
+      .file_stem()
+      .and_then(|s| s.to_str())
+      .unwrap_or("");
+    if fname.starts_with("test_")
+      || fname.ends_with("_test")
+      || fname.ends_with("_spec")
+      || fname.starts_with("spec_")
+    {
       return "test";
     }
     if f.ends_with(".md") || f.starts_with("docs/") {
       return "docs";
     }
-    if f.starts_with(".github/") || f.contains("ci") {
+    if f.starts_with(".github/")
+      || f.starts_with(".gitlab/")
+      || f.starts_with(".circleci/")
+      || f.ends_with(".ci.yml")
+      || f.ends_with(".ci.yaml")
+    {
       return "ci";
     }
     if f.starts_with("nix/") || f == "flake.nix" || f == "Makefile" {
