@@ -266,6 +266,18 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
   let all_envs: Vec<String> = config.env.clone();
 
+  // Resolve credentials once per env for all subsequent steps (steps 5–8).
+  // Vault reads are expensive; threading resolved creds avoids re-reading on
+  // every step.
+  let all_env_creds: Vec<(String, Vec<(String, String)>)> = {
+    let mut v = Vec::new();
+    for e in &all_envs {
+      let creds = infra_output::resolve_infra_credentials(&config, e)?;
+      v.push((e.clone(), creds));
+    }
+    v
+  };
+
   if opts.skip_infra {
     log_dim!("deploy --skip-infra: using existing cache");
     for e in &all_envs {
@@ -306,7 +318,8 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
 
     for e in envs_to_refresh {
       if config_needs_infra(&config, e) {
-        infra_output::refresh(&config, repo_root, e, None)?;
+        let creds = lookup_creds(&all_env_creds, e);
+        infra_output::refresh_with_creds(&config, repo_root, e, None, creds)?;
       } else {
         log_dim!("deploy no from:infra refs for {e} — skipping");
       }
@@ -333,7 +346,13 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
           }
         }
       }
-      sops::generate::run(&config, repo_root, &opts.env, opts.refetch)?;
+      sops::generate::run(
+        &config,
+        repo_root,
+        &opts.env,
+        opts.refetch,
+        Some(all_env_creds.as_slice()),
+      )?;
     }
   } else {
     log_dim!("deploy .sops.yaml skipped (promotion)");
@@ -348,7 +367,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
     for e in &all_envs {
       sops::secrets::generate(&config, repo_root, e)?;
     }
-    encrypt_secrets(&config, repo_root, &all_envs, &opts.env)?;
+    encrypt_secrets(&config, repo_root, &all_envs, &opts.env, &all_env_creds)?;
 
     let secrets_dir =
       repo_root.join(config.nix.secrets.trim_start_matches("./"));
@@ -380,10 +399,11 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   log_step!("deploy [8] deploy");
 
   let mut deployed_targets: Vec<String> = Vec::new();
+  let infra_creds = lookup_creds(&all_env_creds, &opts.env);
 
   for host in &host_list {
     log_step!("deploy host {host}");
-    let target = deploy_host(&config, repo_root, host, &opts.env)?;
+    let target = deploy_host(&config, repo_root, host, &opts.env, infra_creds)?;
     deployed_targets.push(target);
   }
 
@@ -518,6 +538,7 @@ fn encrypt_secrets(
   repo_root: &Path,
   all_envs: &[String],
   _active_env: &str,
+  env_creds: &[(String, Vec<(String, String)>)],
 ) -> Result<()> {
   check_dep("sops", "install sops from https://github.com/getsops/sops")?;
 
@@ -526,6 +547,7 @@ fn encrypt_secrets(
   let sops_config = repo_root.join(format!("{nix_path}/.sops.yaml"));
 
   for env in all_envs {
+    let infra_creds = lookup_creds(env_creds, env);
     for (host_name, machine) in &config.machines {
       for group in &machine.secrets {
         if let Some(fields) = config.secrets.get(group) {
@@ -537,7 +559,14 @@ fn encrypt_secrets(
                 vault::read(config, env, vault_ref)?
               }
               SecretLeaf::FromInfra { unit, output, .. } => {
-                infra_output::read_cached(repo_root, env, unit, output)?
+                infra_output::read_cached(
+                  config,
+                  repo_root,
+                  env,
+                  unit,
+                  output,
+                  &infra_creds,
+                )?
               }
             };
             use std::io::Write;
@@ -618,6 +647,7 @@ fn deploy_host(
   repo_root: &Path,
   host: &str,
   env: &str,
+  infra_creds: &[(String, String)],
 ) -> Result<String> {
   let machine = config.machines.get(host).unwrap();
 
@@ -630,9 +660,14 @@ fn deploy_host(
 
   let host_ip = match ip_entry {
     IpEntry::Static(ip) => ip.clone(),
-    IpEntry::FromInfra { unit, output, .. } => {
-      infra_output::read_cached(repo_root, env, unit, output)?
-    }
+    IpEntry::FromInfra { unit, output, .. } => infra_output::read_cached(
+      config,
+      repo_root,
+      env,
+      unit,
+      output,
+      infra_creds,
+    )?,
   };
 
   log_info!("deploy {host}/{env} → {host_ip}");
@@ -761,6 +796,17 @@ fn fetch_nix_generations(targets: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn lookup_creds<'a>(
+  env_creds: &'a [(String, Vec<(String, String)>)],
+  env: &str,
+) -> &'a [(String, String)] {
+  env_creds
+    .iter()
+    .find(|(e, _)| e == env)
+    .map(|(_, c)| c.as_slice())
+    .unwrap_or(&[])
 }
 
 // ---------------------------------------------------------------------------
