@@ -315,6 +315,7 @@ fn push_refspec(repo: &Repository, refspec: &str) -> Result<()> {
 
 pub fn suggest_commit_msg(repo: &Repository) -> Option<String> {
   let mut opts = git2::DiffOptions::new();
+  opts.include_untracked(true);
   let diff = repo.diff_index_to_workdir(None, Some(&mut opts)).ok()?;
 
   let mut files: Vec<String> = Vec::new();
