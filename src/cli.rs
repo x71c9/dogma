@@ -131,4 +131,9 @@ pub enum InfraCommands {
     #[arg(long)]
     migrate_state: bool,
   },
+  /// Spawn a shell with infra credentials loaded
+  Auth {
+    /// Environment name
+    env: String,
+  },
 }

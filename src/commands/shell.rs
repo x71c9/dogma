@@ -1,53 +1,33 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+use crate::commands::env_cmd::collect_env;
 use crate::config::normalize::normalize;
-use crate::config::{CredentialValue, DogmaConfig};
 use crate::log_info;
-use crate::vault;
 
 pub fn run(repo_root: &Path, env: &str) -> Result<()> {
   let config = normalize(repo_root)?;
-  exec_shell(&config, env)
+  let vars = collect_env(&config, env, repo_root)?;
+  log_info!("entering {env} shell (exit to return)");
+  exec_shell(env, vars)
 }
 
-fn exec_shell(config: &DogmaConfig, env: &str) -> Result<()> {
-  if !config.env.contains(&env.to_string()) {
-    bail!("env '{env}' is not declared in dogma.yml");
-  }
-
-  let mut vars: Vec<(String, String)> = Vec::new();
-
-  if let Some(infra) = &config.infra {
-    for (var_name, cred) in &infra.credentials {
-      let value = match cred {
-        CredentialValue::Static(s) => s.clone(),
-        CredentialValue::FromVault { vault_ref, .. } => {
-          log_info!("resolving {var_name} ...");
-          vault::read(config, env, vault_ref)?
-        }
-      };
-      vars.push((var_name.clone(), value));
-    }
-  }
-
+/// Spawn a shell with the given env vars set and a dogma prompt.
+/// Uses exec(2) — only returns on error.
+pub fn exec_shell(env: &str, vars: Vec<(String, String)>) -> Result<()> {
   let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-  log_info!("entering {env} shell (exit to return)");
 
   let mut cmd = Command::new(&shell);
   for (k, v) in &vars {
     cmd.env(k, v);
   }
 
-  // For bash: write a minimal rcfile that sets a prompt indicating the dogma env
   if shell.ends_with("bash") {
     let rcfile = write_bash_rcfile(env)?;
     cmd.arg("--rcfile").arg(&rcfile);
     let err = cmd.exec();
-    // exec only returns on error
-    // best-effort cleanup of the temp file (may not run if exec succeeds)
     let _ = std::fs::remove_file(&rcfile);
     return Err(err.into());
   }

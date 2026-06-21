@@ -8,21 +8,21 @@ use crate::infra::output::{read_cached, resolve_infra_credentials};
 use crate::vault;
 
 pub fn run(repo_root: &Path, env: &str) -> Result<()> {
-  crate::log::set_quiet(true);
   let config = normalize(repo_root)?;
   print_env(&config, env, repo_root)
 }
 
-pub fn print_env(
+pub fn collect_env(
   config: &DogmaConfig,
   env: &str,
   repo_root: &Path,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
   if !config.env.contains(&env.to_string()) {
     bail!("env '{env}' is not declared in dogma.yml");
   }
 
   let infra_creds = resolve_infra_credentials(config, env)?;
+  let mut vars = Vec::new();
 
   for (group, fields) in &config.secrets {
     for (field, leaf) in fields {
@@ -37,8 +37,20 @@ pub fn print_env(
         }
       };
 
-      println!("export {}={}", var_name, shell_escape(&value));
+      vars.push((var_name, value));
     }
+  }
+
+  Ok(vars)
+}
+
+pub fn print_env(
+  config: &DogmaConfig,
+  env: &str,
+  repo_root: &Path,
+) -> Result<()> {
+  for (var_name, value) in collect_env(config, env, repo_root)? {
+    println!("export {}={}", var_name, shell_escape(&value));
   }
 
   Ok(())

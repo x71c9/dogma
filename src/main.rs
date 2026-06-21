@@ -169,6 +169,12 @@ fn run() -> Result<()> {
       } => {
         commands::infra::destroy(&repo_root, &env, &unit, migrate_state)?;
       }
+      InfraCommands::Auth { env } => {
+        let config = config::normalize::normalize(&repo_root)?;
+        let vars = commands::credentials::collect_credentials(&config, &env)?;
+        log::info(&format!("entering {env} infra shell (exit to return)"));
+        commands::shell::exec_shell(&env, vars)?;
+      }
     },
     Commands::Completions { shell } => {
       commands::completions::run(&shell);
