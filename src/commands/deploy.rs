@@ -37,13 +37,13 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 0: upfront dependency check — fail before touching anything
   // -----------------------------------------------------------------------
-  log_step!("deploy [0] checking dependencies");
+  log_step!("deploy [0/10] checking dependencies");
   check_all_deps()?;
 
   // -----------------------------------------------------------------------
   // Step 1: normalize + validate
   // -----------------------------------------------------------------------
-  log_step!("deploy [1] normalize + validate");
+  log_step!("deploy [1/10] normalize + validate");
   let config = normalize(repo_root)?;
   validate(&config)?;
 
@@ -54,7 +54,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 2: dirty tree check
   // -----------------------------------------------------------------------
-  log_step!("deploy [2] dirty tree check");
+  log_step!("deploy [2/10] dirty tree check");
   let repo = git::open(repo_root)?;
   // Include untracked files: a deploy/* tag must be a COMPLETE snapshot so it
   // can be promoted to other envs. An untracked file (e.g. terraform-generated
@@ -136,7 +136,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 3: resolve version
   // -----------------------------------------------------------------------
-  log_step!("deploy [3] resolve version");
+  log_step!("deploy [3/10] resolve version");
 
   let dogma_version = match &opts.mode {
     Mode::New => {
@@ -217,7 +217,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 4: pre-deploy hooks (--new only)
   // -----------------------------------------------------------------------
-  log_step!("deploy [4] pre-deploy hooks");
+  log_step!("deploy [4/10] pre-deploy hooks");
 
   let host_list: Vec<String> = match &opts.host {
     Some(h) => {
@@ -262,7 +262,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 5: infra cache
   // -----------------------------------------------------------------------
-  log_step!("deploy [5] infra cache");
+  log_step!("deploy [5/10] infra cache");
 
   let all_envs: Vec<String> = config.env.clone();
 
@@ -329,7 +329,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 6: generate .sops.yaml
   // -----------------------------------------------------------------------
-  log_step!("deploy [6] generate .sops.yaml");
+  log_step!("deploy [6/10] generate .sops.yaml");
 
   if matches!(opts.mode, Mode::New) {
     if opts.skip_sops {
@@ -361,7 +361,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 7: generate secrets.nix + encrypt secrets
   // -----------------------------------------------------------------------
-  log_step!("deploy [7] generate + encrypt secrets");
+  log_step!("deploy [7/10] generate + encrypt secrets");
 
   if matches!(opts.mode, Mode::New) {
     for e in &all_envs {
@@ -396,7 +396,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 8: per-host deploy
   // -----------------------------------------------------------------------
-  log_step!("deploy [8] deploy");
+  log_step!("deploy [8/10] deploy");
 
   let mut deployed_targets: Vec<String> = Vec::new();
   let infra_creds = lookup_creds(&all_env_creds, &opts.env);
@@ -410,7 +410,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 9: git tags + push
   // -----------------------------------------------------------------------
-  log_step!("deploy [9] release tag");
+  log_step!("deploy [9/10] release tag");
   release_tag(
     &repo,
     &dogma_version,
@@ -422,7 +422,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   // Step 10: post-deploy hooks
   // -----------------------------------------------------------------------
-  log_step!("deploy [10] post-deploy hooks");
+  log_step!("deploy [10/10] post-deploy hooks");
   let dogma_deployed_ips = deployed_targets.join("\n");
   run_hooks(
     "post-deploy",
