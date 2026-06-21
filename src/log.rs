@@ -1,7 +1,19 @@
 //! Minimal ANSI logging. All output goes to stderr.
 //! Colors suppressed when stderr is not a tty or NO_COLOR is set.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Suppress info/dim lines (warnings and errors still emit).
+pub fn set_quiet(q: bool) {
+  QUIET.store(q, Ordering::Relaxed);
+}
+
+fn is_quiet() -> bool {
+  QUIET.load(Ordering::Relaxed)
+}
 
 fn colors_enabled() -> bool {
   static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -36,17 +48,23 @@ fn emit(color: &str, tag: Option<&str>, msg: &str) {
 
 /// Normal progress line: default color.
 pub fn info(msg: &str) {
-  emit("", None, msg);
+  if !is_quiet() {
+    emit("", None, msg);
+  }
 }
 
 /// Section header: blue.
 pub fn step(msg: &str) {
-  emit(BLUE, None, msg);
+  if !is_quiet() {
+    emit(BLUE, None, msg);
+  }
 }
 
 /// De-emphasized line (cached, skipped, unchanged): dim.
 pub fn dim(msg: &str) {
-  emit(DIM, None, msg);
+  if !is_quiet() {
+    emit(DIM, None, msg);
+  }
 }
 
 /// Warning: yellow, tagged "[warning]".
