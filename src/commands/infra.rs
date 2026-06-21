@@ -114,6 +114,25 @@ fn run_infra(
     &credentials,
   )?;
 
+  // On destroy, clear the cached age keys for all machines in this env so the
+  // next deploy re-keyscans the new servers after re-apply.
+  if subcommand == "destroy" {
+    let age_keys_dir = repo_root.join(".dogma/age-keys");
+    for (host_name, machine) in &config.machines {
+      let hostname = machine.hostname.get(env, host_name);
+      let cache_file = age_keys_dir.join(format!("{hostname}.pub"));
+      if cache_file.exists() {
+        if let Err(e) = std::fs::remove_file(&cache_file) {
+          log_warn!(
+            "infra failed to clear age key cache for {hostname}: {e:#}"
+          );
+        } else {
+          log_info!("infra cleared age key cache: {hostname}");
+        }
+      }
+    }
+  }
+
   // Cache this unit's outputs now that apply succeeded: they exist in remote
   // state, so `dogma output`/`env`/`deploy` can read them without a separate
   // run. refresh merges into .dogma/cache/<env>.json, preserving other units'
