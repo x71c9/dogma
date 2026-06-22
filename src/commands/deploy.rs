@@ -456,12 +456,21 @@ fn run_hooks(
     return Ok(());
   }
   for hook in hooks {
-    let hook_path = repo_root.join(hook);
+    let hook = hook
+      .replace("{env}", env)
+      .replace("{version}", version)
+      .replace("{hosts}", hosts)
+      .replace("{deployed_ips}", deployed_ips);
+    let mut parts = hook.split_whitespace();
+    let cmd = parts.next().unwrap_or("");
+    let args: Vec<&str> = parts.collect();
+    let hook_path = repo_root.join(cmd);
     if !hook_path.exists() {
-      bail!("hook not found: {hook}");
+      bail!("hook not found: {cmd}");
     }
     log_info!("deploy running {hook_name} hook: {hook}");
     let status = Command::new(&hook_path)
+      .args(&args)
       .env("DOGMA_VERSION", version)
       .env("DOGMA_ENV", env)
       .env("DOGMA_HOSTS", hosts)
