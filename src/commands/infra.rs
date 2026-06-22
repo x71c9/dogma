@@ -244,7 +244,6 @@ pub fn resolve_credentials(
     let value = match cred {
       CredentialValue::Static(s) => s.clone(),
       CredentialValue::FromVault { vault_ref, .. } => {
-        log_info!("infra resolving credential {var_name} ...");
         vault::read(config, env, vault_ref)?
       }
     };
