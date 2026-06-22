@@ -8,6 +8,7 @@ use crate::infra::output::{read_cached, resolve_infra_credentials};
 use crate::vault;
 
 pub fn run(repo_root: &Path, env: &str) -> Result<()> {
+  crate::log::set_quiet(true);
   let config = normalize(repo_root)?;
   print_env(&config, env, repo_root)
 }
