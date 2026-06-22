@@ -204,6 +204,11 @@ pub struct InfraBlock {
   #[serde(default = "default_backend_config")]
   pub backend_config: String,
 
+  /// Optional override for the S3 backend state key. Supports `{env}` and
+  /// `{unit}` placeholders. When absent, defaults to `{env}/{unit}/terraform.tfstate`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub state_key: Option<String>,
+
   #[serde(default)]
   pub credentials: IndexMap<String, CredentialValue>,
 }
