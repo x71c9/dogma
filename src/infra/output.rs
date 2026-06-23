@@ -128,6 +128,7 @@ pub fn read_cached(
     return fetch_sensitive_output(
       config,
       repo_root,
+      env,
       unit,
       output,
       credentials,
@@ -144,6 +145,7 @@ pub fn read_cached(
 fn fetch_sensitive_output(
   config: &DogmaConfig,
   repo_root: &Path,
+  env: &str,
   unit: &str,
   output: &str,
   credentials: &[(String, String)],
@@ -157,6 +159,21 @@ fn fetch_sensitive_output(
   let unit_dir = repo_root
     .join(infra.path.trim_start_matches("./"))
     .join(unit);
+
+  // Re-init before reading so that .terraform/ is pointing at the correct
+  // env's backend. Without this, a previous run that processed a different
+  // env's units last would leave .terraform/ on the wrong state bucket, and
+  // `tofu output -raw` would silently return that env's value instead.
+  init_unit(
+    config,
+    repo_root,
+    cli,
+    &unit_dir,
+    env,
+    unit,
+    false,
+    credentials,
+  )?;
 
   log_dim!("infra output '{output}' is sensitive — fetching live via {cli}");
 
