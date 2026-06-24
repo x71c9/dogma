@@ -77,6 +77,7 @@ pub fn refresh_with_creds(
       env,
       unit,
       false,
+      false,
       credentials,
     )?;
 
@@ -172,6 +173,7 @@ fn fetch_sensitive_output(
     env,
     unit,
     false,
+    false,
     credentials,
   )?;
 
@@ -248,17 +250,10 @@ fn discover_units(infra_dir: &Path) -> Result<Vec<String>> {
     if name.starts_with('.') {
       continue;
     }
-    // Only dirs containing at least one .tf file
-    let has_tf = std::fs::read_dir(&path)?.any(|e| {
-      e.ok()
-        .and_then(|e| {
-          let n = e.file_name();
-          let s = n.to_string_lossy();
-          s.ends_with(".tf").then_some(())
-        })
-        .is_some()
-    });
-    if has_tf {
+    // Only include dirs that have a backend block in at least one .tf file.
+    // Shared-variable directories (.tf files but no backend) are skipped —
+    // they cannot be init-ed and have no outputs to cache.
+    if dir_has_backend(&path) {
       units.push(name);
     }
   }
@@ -267,4 +262,23 @@ fn discover_units(infra_dir: &Path) -> Result<Vec<String>> {
     bail!("no unit directories found under {}", infra_dir.display());
   }
   Ok(units)
+}
+
+fn dir_has_backend(dir: &Path) -> bool {
+  let Ok(rd) = std::fs::read_dir(dir) else {
+    return false;
+  };
+  for entry in rd.flatten() {
+    let p = entry.path();
+    if p.extension().and_then(|e| e.to_str()) != Some("tf") {
+      continue;
+    }
+    let Ok(contents) = std::fs::read_to_string(&p) else {
+      continue;
+    };
+    if contents.contains("backend \"") {
+      return true;
+    }
+  }
+  false
 }

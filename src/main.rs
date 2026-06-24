@@ -152,6 +152,7 @@ fn run() -> Result<()> {
         env,
         unit,
         migrate_state,
+        upgrade,
         message,
       } => {
         commands::infra::apply(
@@ -159,6 +160,7 @@ fn run() -> Result<()> {
           &env,
           &unit,
           migrate_state,
+          upgrade,
           message,
         )?;
       }
@@ -166,8 +168,15 @@ fn run() -> Result<()> {
         env,
         unit,
         migrate_state,
+        upgrade,
       } => {
-        commands::infra::destroy(&repo_root, &env, &unit, migrate_state)?;
+        commands::infra::destroy(
+          &repo_root,
+          &env,
+          &unit,
+          migrate_state,
+          upgrade,
+        )?;
       }
       InfraCommands::Auth { env } => {
         let config = config::normalize::normalize(&repo_root)?;

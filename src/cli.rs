@@ -78,7 +78,7 @@ pub enum Commands {
     /// Skip .sops.yaml generation (use existing)
     #[arg(long)]
     skip_sops: bool,
-    /// Clear infra cache + age key cache and re-fetch everything
+    /// Clear infra cache and re-fetch everything
     #[arg(long)]
     refetch: bool,
     /// Pre-commit message for dirty tree (only valid with --new)
@@ -115,8 +115,11 @@ pub enum InfraCommands {
     /// Infra unit name
     unit: String,
     /// Pass -migrate-state to tofu init instead of -reconfigure
-    #[arg(long)]
+    #[arg(long, conflicts_with = "upgrade")]
     migrate_state: bool,
+    /// Pass -upgrade to tofu init (updates provider lock file)
+    #[arg(long, conflicts_with = "migrate_state")]
+    upgrade: bool,
     /// Commit message for dirty tree (skips interactive prompt)
     #[arg(short = 'm', long)]
     message: Option<String>,
@@ -128,8 +131,11 @@ pub enum InfraCommands {
     /// Infra unit name
     unit: String,
     /// Pass -migrate-state to tofu init instead of -reconfigure
-    #[arg(long)]
+    #[arg(long, conflicts_with = "upgrade")]
     migrate_state: bool,
+    /// Pass -upgrade to tofu init (updates provider lock file)
+    #[arg(long, conflicts_with = "migrate_state")]
+    upgrade: bool,
   },
   /// Spawn a shell with infra credentials loaded
   Auth {
