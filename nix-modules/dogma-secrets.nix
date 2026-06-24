@@ -6,6 +6,10 @@
 #
 #   dogma.machine = "server_backend";
 #
+# The project flake must set the secrets directory once in mkSystem:
+#
+#   { dogma.secretsPath = ./secrets; }
+#
 # Secrets are env-specific (each env's host has its own age key) but the config
 # is shared across all envs: the env comes from the `environment` module arg
 # (injected by flake.nix mkSystem), the machine role from dogma.machine. Secrets
@@ -20,8 +24,6 @@
 # Each secret is decrypted to /run/secrets/<group>/<field> at boot.
 
 let
-  secretsBase = ../../secrets;
-
   secretModule = lib.types.submodule ({ ... }: {
     options = {
       owner = lib.mkOption {
@@ -36,6 +38,7 @@ let
   });
 
   machine = config.dogma.machine;
+  secretsBase = config.dogma.secretsPath;
 
   # Auto-import generated secrets list if present. Falls back to empty if
   # dogma deploy has not been run yet (e.g. first checkout).
@@ -54,6 +57,11 @@ in
     machine = lib.mkOption {
       type = lib.types.str;
       description = "Dogma machine role (e.g. server_backend), env-agnostic. Set once in the host's default.nix; the env is injected separately by flake.nix.";
+    };
+
+    secretsPath = lib.mkOption {
+      type = lib.types.path;
+      description = "Absolute path to the secrets directory (the one containing <env>/<machine>/ subdirs). Set once in the project flake's mkSystem, e.g. { dogma.secretsPath = ./secrets; }.";
     };
 
     secrets = lib.mkOption {
