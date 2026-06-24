@@ -23,7 +23,7 @@ pub fn run(
   config: &DogmaConfig,
   repo_root: &Path,
   _env: &str,
-  refetch: bool,
+  _refetch: bool,
   env_creds: Option<&[EnvCreds]>,
 ) -> Result<()> {
   check_dep("ssh-keyscan", "install openssh")?;
@@ -38,9 +38,6 @@ pub fn run(
   let secrets_abs = repo_root.join(nix_secrets);
   let secrets_rel = pathdiff::diff_paths(&secrets_abs, sops_dir)
     .unwrap_or_else(|| secrets_abs.clone());
-
-  let age_keys_dir = repo_root.join(".dogma/age-keys");
-  std::fs::create_dir_all(&age_keys_dir)?;
 
   // Collect admin keys
   let (pgp_keys, age_keys) = collect_admin_keys(config)?;
@@ -76,19 +73,9 @@ pub fn run(
           }
         };
 
-      let cache_file = age_keys_dir.join(format!("{hostname}.pub"));
-      let host_age = if !refetch && cache_file.exists() {
-        log_dim!("sops {host_name}: using cached age key");
-        std::fs::read_to_string(&cache_file)?.trim().to_string()
-      } else {
-        match fetch_age_key(&ip, &hostname, &cache_file) {
-          Ok(k) => k,
-          Err(e) => {
-            log_warn!("sops {host_name}/{env_name}: cannot fetch age key — skipping ({e})");
-            continue;
-          }
-        }
-      };
+      let host_age = fetch_age_key(&ip, &hostname).with_context(|| {
+        format!("sops {host_name}/{env_name}: failed to fetch age key")
+      })?;
 
       let path_regex = format!(
         "{}/{}/{}/.*\\.yaml$",
@@ -184,11 +171,7 @@ fn resolve_ip(
   }
 }
 
-fn fetch_age_key(
-  ip: &str,
-  hostname: &str,
-  cache_file: &Path,
-) -> Result<String> {
+fn fetch_age_key(ip: &str, hostname: &str) -> Result<String> {
   log_info!("sops {hostname}: fetching SSH host key from {ip} ...");
 
   let out = Command::new("ssh-keyscan")
@@ -233,10 +216,5 @@ fn fetch_age_key(
     bail!("{hostname}: ssh-to-age produced empty output");
   }
 
-  std::fs::write(cache_file, format!("{age_key}\n")).with_context(|| {
-    format!("failed to cache age key: {}", cache_file.display())
-  })?;
-
-  log_dim!("sops {hostname}: age key cached");
   Ok(age_key)
 }

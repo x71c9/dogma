@@ -78,7 +78,7 @@ pub enum Commands {
     /// Skip .sops.yaml generation (use existing)
     #[arg(long)]
     skip_sops: bool,
-    /// Clear infra cache + age key cache and re-fetch everything
+    /// Clear infra cache and re-fetch everything
     #[arg(long)]
     refetch: bool,
     /// Pre-commit message for dirty tree (only valid with --new)

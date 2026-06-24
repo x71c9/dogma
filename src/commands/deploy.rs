@@ -335,17 +335,6 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
     if opts.skip_sops {
       log_dim!("deploy --skip-sops: using existing .sops.yaml");
     } else {
-      if opts.refetch {
-        let age_dir = repo_root.join(".dogma/age-keys");
-        if age_dir.exists() {
-          for entry in std::fs::read_dir(&age_dir)? {
-            let entry = entry?;
-            if entry.path().extension().is_some_and(|e| e == "pub") {
-              std::fs::remove_file(entry.path())?;
-            }
-          }
-        }
-      }
       sops::generate::run(
         &config,
         repo_root,
