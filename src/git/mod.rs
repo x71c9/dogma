@@ -313,31 +313,18 @@ fn push_refspec(repo: &Repository, refspec: &str) -> Result<()> {
 // Suggest commit message (heuristic, mirrors suggest-commit-msg.sh)
 // ---------------------------------------------------------------------------
 
-pub fn suggest_commit_msg(repo: &Repository) -> Option<String> {
-  let mut opts = git2::DiffOptions::new();
-  opts.include_untracked(true);
-  let diff = repo.diff_index_to_workdir(None, Some(&mut opts)).ok()?;
-
-  let mut files: Vec<String> = Vec::new();
-  diff
-    .foreach(
-      &mut |delta, _| {
-        if let Some(p) = delta.new_file().path() {
-          files.push(p.to_string_lossy().to_string());
-        }
-        true
-      },
-      None,
-      None,
-      None,
-    )
-    .ok()?;
+pub fn suggest_commit_msg(dirty: &DirtyFiles) -> Option<String> {
+  let files: Vec<String> = dirty.files.iter().map(|f| f.path.clone()).collect();
 
   if files.is_empty() {
     return None;
   }
 
-  let commit_type = infer_type(&files);
+  let all_new = dirty
+    .files
+    .iter()
+    .all(|f| f.status == 'A' || f.status == '?');
+  let commit_type = if all_new { "feat" } else { infer_type(&files) };
   let scope = infer_scope(&files);
   let desc = files
     .iter()
@@ -393,7 +380,7 @@ fn infer_type(files: &[String]) -> &'static str {
       return "chore";
     }
   }
-  "fix"
+  "chore"
 }
 
 fn infer_scope(files: &[String]) -> Option<String> {

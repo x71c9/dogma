@@ -97,7 +97,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
           bail!("aborted — commit or stash your changes and re-run");
         }
-        let suggested = git::suggest_commit_msg(&repo);
+        let suggested = git::suggest_commit_msg(&dirty);
         let prompt_msg = if let Some(ref s) = suggested {
           log_info!("deploy suggested message: {}", crate::log::cyan(s));
           eprint!(
