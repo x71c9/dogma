@@ -77,6 +77,7 @@ pub fn refresh_with_creds(
       env,
       unit,
       false,
+      false,
       credentials,
     )?;
 
@@ -171,6 +172,7 @@ fn fetch_sensitive_output(
     &unit_dir,
     env,
     unit,
+    false,
     false,
     credentials,
   )?;

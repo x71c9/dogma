@@ -10,11 +10,19 @@ use crate::error::check_dep;
 use crate::vault;
 use crate::{git, log_dim, log_info, log_step, log_warn};
 
+struct InfraFlags {
+  migrate_state: bool,
+  upgrade: bool,
+  subcommand: &'static str,
+  commit_msg: Option<String>,
+}
+
 pub fn apply(
   repo_root: &Path,
   env: &str,
   unit: &str,
   migrate_state: bool,
+  upgrade: bool,
   commit_msg: Option<String>,
 ) -> Result<()> {
   let config = normalize(repo_root)?;
@@ -24,9 +32,12 @@ pub fn apply(
     repo_root,
     env,
     unit,
-    migrate_state,
-    "apply",
-    commit_msg,
+    InfraFlags {
+      migrate_state,
+      upgrade,
+      subcommand: "apply",
+      commit_msg,
+    },
   )
 }
 
@@ -35,6 +46,7 @@ pub fn destroy(
   env: &str,
   unit: &str,
   migrate_state: bool,
+  upgrade: bool,
 ) -> Result<()> {
   let config = normalize(repo_root)?;
   validate(&config)?;
@@ -43,9 +55,12 @@ pub fn destroy(
     repo_root,
     env,
     unit,
-    migrate_state,
-    "destroy",
-    None,
+    InfraFlags {
+      migrate_state,
+      upgrade,
+      subcommand: "destroy",
+      commit_msg: None,
+    },
   )
 }
 
@@ -54,10 +69,14 @@ fn run_infra(
   repo_root: &Path,
   env: &str,
   unit: &str,
-  migrate_state: bool,
-  subcommand: &str,
-  commit_msg: Option<String>,
+  flags: InfraFlags,
 ) -> Result<()> {
+  let InfraFlags {
+    migrate_state,
+    upgrade,
+    subcommand,
+    commit_msg,
+  } = flags;
   if !config.env.contains(&env.to_string()) {
     bail!("env '{env}' is not declared in dogma.yml");
   }
@@ -99,6 +118,7 @@ fn run_infra(
       env,
       unit,
       migrate_state,
+      upgrade,
       credentials: &credentials,
     },
   )?;
@@ -276,6 +296,7 @@ struct InitArgs<'a> {
   env: &'a str,
   unit: &'a str,
   migrate_state: bool,
+  upgrade: bool,
   credentials: &'a [(String, String)],
 }
 
@@ -304,6 +325,7 @@ fn run_init(
     args.env,
     args.unit,
     args.migrate_state,
+    args.upgrade,
     args.credentials,
   )
 }
@@ -321,6 +343,7 @@ pub fn init_unit(
   env: &str,
   unit: &str,
   migrate_state: bool,
+  upgrade: bool,
   credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
@@ -339,9 +362,10 @@ pub fn init_unit(
     .unwrap_or_else(|| format!("{env}/{unit}/terraform.tfstate"));
 
   // Skip init when the unit is already initialized for this exact backend
-  // (same bucket + state key). `-migrate-state` always re-runs so state moves
-  // are never silently skipped.
+  // (same bucket + state key). `-migrate-state` and `-upgrade` always re-run
+  // so lock file or state moves are never silently skipped.
   if !migrate_state
+    && !upgrade
     && backend_already_correct(unit_dir, &backend_conf, &state_key_value)
   {
     log_dim!("infra {unit} already initialized for {env} — skipping init");
@@ -350,6 +374,8 @@ pub fn init_unit(
 
   let reconfigure_flag = if migrate_state {
     "-migrate-state"
+  } else if upgrade {
+    "-upgrade"
   } else {
     "-reconfigure"
   };
