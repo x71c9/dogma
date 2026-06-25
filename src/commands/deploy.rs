@@ -97,7 +97,7 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
         if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
           bail!("aborted — commit or stash your changes and re-run");
         }
-        let suggested = git::suggest_commit_msg(&repo);
+        let suggested = git::suggest_commit_msg(&dirty);
         let prompt_msg = if let Some(ref s) = suggested {
           log_info!("deploy suggested message: {}", crate::log::cyan(s));
           eprint!(
@@ -169,36 +169,43 @@ pub fn run(repo_root: &Path, opts: DeployOptions) -> Result<()> {
       tag
     }
     Mode::Interactive => {
-      let tags = git::list_deploy_tags(&repo)?;
-      if tags.is_empty() {
+      let tags_with_date = git::list_deploy_tags_with_date(&repo)?;
+      if tags_with_date.is_empty() {
         bail!(
           "no deploy/* tags found — run 'dogma deploy {} --new' first",
           opts.env
         );
       }
-      log_info!("deploy available versions:");
-      for (i, tag) in tags.iter().enumerate() {
-        let marker = if i == 0 { " (latest)" } else { "" };
-        eprintln!("  [{}] {tag}{marker}", i + 1);
-      }
-      eprint!(
-        "{}select version to deploy to '{}' [1]: ",
-        crate::log::prompt_prefix(),
-        opts.env
-      );
-      io::stderr().flush()?;
-      let mut sel = String::new();
-      io::stdin().read_line(&mut sel)?;
-      let sel = sel.trim();
-      let idx: usize = if sel.is_empty() {
-        1
-      } else {
-        sel.parse().context("invalid selection")?
+      let items: Vec<String> = tags_with_date
+        .iter()
+        .enumerate()
+        .map(|(i, (t, date))| {
+          let date_part = if date.is_empty() {
+            String::new()
+          } else {
+            format!("  {date}")
+          };
+          if i == 0 {
+            format!("{t}{date_part}  (latest)")
+          } else {
+            format!("{t}{date_part}")
+          }
+        })
+        .collect();
+      let theme = dialoguer::theme::ColorfulTheme {
+        active_item_style: dialoguer::console::Style::new().for_stderr().red(),
+        active_item_prefix: dialoguer::console::style(">".to_string())
+          .for_stderr()
+          .red(),
+        ..dialoguer::theme::ColorfulTheme::default()
       };
-      if idx < 1 || idx > tags.len() {
-        bail!("selection out of range: {idx}");
-      }
-      let tag = tags[idx - 1].clone();
+      let idx = dialoguer::Select::with_theme(&theme)
+        .with_prompt(format!("select version to deploy to '{}'", opts.env))
+        .items(&items)
+        .default(0)
+        .max_length(10)
+        .interact_on(&dialoguer::console::Term::stderr())?;
+      let tag = tags_with_date[idx].0.clone();
       log_info!("deploy selected: {tag}");
       log_info!("deploy checking out {tag} (detached HEAD) ...");
       git::checkout_tag(&repo, &tag)?;
