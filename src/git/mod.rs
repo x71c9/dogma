@@ -151,6 +151,57 @@ pub fn list_deploy_tags(repo: &Repository) -> Result<Vec<String>> {
   Ok(tags)
 }
 
+/// Returns deploy tags sorted newest-first, each paired with a formatted date
+/// string (`YYYY-MM-DD`). Falls back to the commit date when the tag is
+/// lightweight (no tag object), and to an empty string on any error.
+pub fn list_deploy_tags_with_date(
+  repo: &Repository,
+) -> Result<Vec<(String, String)>> {
+  let tags = list_deploy_tags(repo)?;
+  let pairs = tags
+    .into_iter()
+    .map(|name| {
+      let date = tag_date(repo, &name).unwrap_or_default();
+      (name, date)
+    })
+    .collect();
+  Ok(pairs)
+}
+
+fn tag_date(repo: &Repository, name: &str) -> Option<String> {
+  let obj = repo.revparse_single(name).ok()?;
+  let time = if let Ok(tag) = obj.clone().into_tag() {
+    tag.tagger()?.when()
+  } else {
+    obj.peel_to_commit().ok()?.time()
+  };
+  let secs = time.seconds();
+  let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)?
+    .with_timezone(&chrono::Local);
+  let now = chrono::Local::now();
+  let diff = now.signed_duration_since(dt);
+  let (n, unit) = if diff.num_seconds() < 60 {
+    (0u64, "just now")
+  } else if diff.num_minutes() < 60 {
+    (diff.num_minutes() as u64, "m ago")
+  } else if diff.num_hours() < 24 {
+    (diff.num_hours() as u64, "h ago")
+  } else if diff.num_days() < 30 {
+    (diff.num_days() as u64, "d ago")
+  } else if diff.num_days() < 365 {
+    ((diff.num_days() / 30) as u64, "mo ago")
+  } else {
+    ((diff.num_days() / 365) as u64, "y ago")
+  };
+  let rel = if unit == "just now" {
+    "just now".to_string()
+  } else {
+    format!("{n:>2}{unit}")
+  };
+  let relative = format!("{rel:<9}");
+  Some(format!("{}  {}", dt.format("%Y-%m-%d %H:%M"), relative))
+}
+
 pub fn tag_exists(repo: &Repository, name: &str) -> Result<bool> {
   Ok(
     repo
