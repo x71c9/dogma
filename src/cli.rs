@@ -57,28 +57,32 @@ pub enum Commands {
     env: String,
   },
 
-  /// Deploy to one or all hosts for an environment
-  Deploy {
-    /// Environment name
-    env: String,
-    /// Deploy to a specific host only
+  /// Run a named pipeline (build, publish, etc.)
+  #[command(
+    visible_alias = "deploy",
+    visible_alias = "release",
+    visible_alias = "publish"
+  )]
+  Pipeline {
+    /// Pipeline name as declared in dogma.yml [[pipeline]]
+    pipeline: String,
+    /// Environment name (e.g. dev, prod) — falls back to pipeline default_env if omitted
+    env: Option<String>,
+    /// Deploy to a specific host only (nixos type only)
     host: Option<String>,
-    /// Create a new CalVer version, run hooks, commit, deploy, tag
+    /// Create a new version, run hooks, commit, deploy, tag
     #[arg(long, conflicts_with_all = ["latest", "version"])]
     new: bool,
-    /// Deploy the latest existing deploy/* tag
+    /// Deploy the latest existing version tag
     #[arg(long, conflicts_with_all = ["new", "version"])]
     latest: bool,
     /// Deploy a specific existing version tag
     #[arg(long, conflicts_with_all = ["new", "latest"], value_name = "TAG")]
     version: Option<String>,
-    /// Skip infra cache refresh (use existing cache)
+    /// Skip infra cache refresh (nixos type only)
     #[arg(long)]
     skip_infra: bool,
-    /// Skip .sops.yaml generation (use existing)
-    #[arg(long)]
-    skip_sops: bool,
-    /// Clear infra cache and re-fetch everything
+    /// Clear infra cache and re-fetch everything (nixos type only)
     #[arg(long)]
     refetch: bool,
     /// Pre-commit message for dirty tree (only valid with --new)

@@ -30,10 +30,10 @@ pub struct DogmaConfig {
   pub nix: NixBlock,
 
   #[serde(default)]
-  pub hooks: HooksBlock,
+  pub deploy: DeployBlock,
 
   #[serde(default)]
-  pub deploy: DeployBlock,
+  pub pipeline: Vec<PipelineConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,19 +274,6 @@ fn default_nix_sops() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Hooks block
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct HooksBlock {
-  #[serde(rename = "pre-deploy", default)]
-  pub pre_deploy: Vec<String>,
-
-  #[serde(rename = "post-deploy", default)]
-  pub post_deploy: Vec<String>,
-}
-
-// ---------------------------------------------------------------------------
 // Deploy block
 // ---------------------------------------------------------------------------
 
@@ -301,4 +288,81 @@ pub struct DeployBlock {
 pub enum DeployStrategy {
   #[default]
   NixosRebuild,
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline block
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PipelineConfig {
+  pub name: String,
+
+  /// Built-in deploy type. Defaults to "custom" (shell command).
+  #[serde(default, rename = "type")]
+  pub pipeline_type: PipelineType,
+
+  /// Tag namespace prefix, e.g. "deploy" → "deploy/v26.06.0001"
+  #[serde(default = "default_version_prefix")]
+  pub version_prefix: String,
+
+  #[serde(default)]
+  pub version_scheme: VersionScheme,
+
+  /// Path to script that prints the full version string (required when scheme = custom)
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub version_script: Option<String>,
+
+  /// Prefix for the "deployed" marker tag, e.g. "deployed" → "deployed-<env>-v26.06.0001"
+  #[serde(default = "default_deployed_prefix")]
+  pub deployed_prefix: String,
+
+  /// Shell command template (required for type=custom, forbidden for type=nixos).
+  /// Supports {env}, {version}, {pipeline} placeholders.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub command: Option<String>,
+
+  /// Default environment used when <env> is omitted on the command line.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub env: Option<String>,
+
+  #[serde(default)]
+  pub hooks: PipelineHooks,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PipelineType {
+  #[default]
+  Custom,
+  Nixos,
+}
+
+fn default_version_prefix() -> String {
+  "deploy".to_string()
+}
+
+fn default_deployed_prefix() -> String {
+  "deployed".to_string()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VersionScheme {
+  /// vYY.MM.NNNN — fully automatic, no input needed
+  #[default]
+  Calver,
+  /// vMAJOR.MINOR.PATCH — dogma prompts patch/minor/major interactively
+  Semver,
+  /// version_script prints the full tag to stdout
+  Custom,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PipelineHooks {
+  #[serde(rename = "pre-deploy", default)]
+  pub pre_deploy: Vec<String>,
+
+  #[serde(rename = "post-deploy", default)]
+  pub post_deploy: Vec<String>,
 }

@@ -1,6 +1,9 @@
 use anyhow::{bail, Result};
 
-use super::{CredentialValue, DogmaConfig, IpEntry, SecretLeaf};
+use super::{
+  CredentialValue, DogmaConfig, IpEntry, PipelineType, SecretLeaf,
+  VersionScheme,
+};
 
 #[allow(dead_code)]
 pub fn validate(config: &DogmaConfig) -> Result<()> {
@@ -101,6 +104,60 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
                     ));
         }
       }
+    }
+  }
+
+  // Pipeline checks
+  let mut pipeline_names: std::collections::HashSet<&str> =
+    std::collections::HashSet::new();
+  for p in &config.pipeline {
+    if p.name.is_empty() {
+      errors.push("pipeline[?].name: must not be empty".to_string());
+      continue;
+    }
+    if !pipeline_names.insert(p.name.as_str()) {
+      errors.push(format!("pipeline '{}': duplicate name", p.name));
+    }
+    match (&p.pipeline_type, &p.command) {
+      (PipelineType::Custom, None) => {
+        errors.push(format!(
+          "pipeline '{}': type=custom requires a command",
+          p.name
+        ));
+      }
+      (PipelineType::Custom, Some(s)) if s.is_empty() => {
+        errors.push(format!(
+          "pipeline '{}': type=custom requires a non-empty command",
+          p.name
+        ));
+      }
+      (PipelineType::Nixos, Some(_)) => {
+        errors.push(format!(
+          "pipeline '{}': type=nixos does not accept a command",
+          p.name
+        ));
+      }
+      _ => {}
+    }
+    if p.version_prefix.is_empty() {
+      errors.push(format!(
+        "pipeline '{}': version_prefix must not be empty",
+        p.name
+      ));
+    }
+    if p.deployed_prefix.is_empty() {
+      errors.push(format!(
+        "pipeline '{}': deployed_prefix must not be empty",
+        p.name
+      ));
+    }
+    if matches!(p.version_scheme, VersionScheme::Custom)
+      && p.version_script.is_none()
+    {
+      errors.push(format!(
+        "pipeline '{}': version_scheme = custom requires version_script",
+        p.name
+      ));
     }
   }
 
