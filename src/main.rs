@@ -14,7 +14,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use cli::{Cli, Commands, InfraCommands};
-use commands::deploy::{DeployOptions, Mode};
+use commands::pipeline::PipelineOptions;
 
 fn main() {
   if let Err(e) = run() {
@@ -46,8 +46,8 @@ fn run() -> Result<()> {
           secrets: Default::default(),
           infra: None,
           nix: Default::default(),
-          hooks: Default::default(),
           deploy: Default::default(),
+          pipeline: Default::default(),
         }
       });
 
@@ -114,34 +114,34 @@ fn run() -> Result<()> {
     Commands::Shell { env } => {
       commands::shell::run(&repo_root, &env)?;
     }
-    Commands::Deploy {
+    Commands::Pipeline {
+      pipeline,
       env,
       host,
       new,
       latest,
       version,
       skip_infra,
-      skip_sops,
       refetch,
       message,
     } => {
       let mode = if new {
-        Mode::New
+        commands::pipeline::Mode::New
       } else if latest {
-        Mode::Latest
+        commands::pipeline::Mode::Latest
       } else if let Some(tag) = version {
-        Mode::Version(tag)
+        commands::pipeline::Mode::Version(tag)
       } else {
-        Mode::Interactive
+        commands::pipeline::Mode::Interactive
       };
-      commands::deploy::run(
+      commands::pipeline::run(
         &repo_root,
-        DeployOptions {
+        PipelineOptions {
+          pipeline_name: pipeline,
           env,
           host,
           mode,
           skip_infra,
-          skip_sops,
           refetch,
           commit_msg: message,
         },

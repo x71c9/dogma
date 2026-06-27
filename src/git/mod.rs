@@ -112,17 +112,18 @@ pub fn amend_all(repo: &Repository) -> Result<()> {
 // Version (CalVer: deploy/vYY.MM.NNNN)
 // ---------------------------------------------------------------------------
 
-pub fn next_version(repo: &Repository) -> Result<String> {
+/// Compute next CalVer tag for an arbitrary prefix: <prefix>/vYY.MM.NNNN
+pub fn next_calver(repo: &Repository, version_prefix: &str) -> Result<String> {
   let month = chrono::Utc::now().format("%y.%m").to_string();
-  let prefix = format!("deploy/v{}.", month);
+  let tag_prefix = format!("{version_prefix}/v{month}.");
 
   let mut max_n: u32 = 0;
   repo
-    .tag_names(Some(&format!("{}*", prefix)))?
+    .tag_names(Some(&format!("{tag_prefix}*")))?
     .iter()
     .flatten()
     .for_each(|tag| {
-      if let Some(suffix) = tag.strip_prefix(&prefix) {
+      if let Some(suffix) = tag.strip_prefix(&tag_prefix) {
         if let Ok(n) = suffix.parse::<u32>() {
           if n > max_n {
             max_n = n;
@@ -131,33 +132,136 @@ pub fn next_version(repo: &Repository) -> Result<String> {
       }
     });
 
-  Ok(format!("deploy/v{}.{:04}", month, max_n + 1))
+  Ok(format!("{version_prefix}/v{month}.{:04}", max_n + 1))
+}
+
+/// Compute next SemVer tag for an arbitrary prefix.
+/// Scans existing tags matching `<prefix>/v*.*.*` to find the current latest
+/// base, then prompts the user for patch/minor/major bump.
+/// Returns `<prefix>/vX.Y.Z`.
+pub fn next_semver(
+  repo: &Repository,
+  version_prefix: &str,
+  repo_root: &std::path::Path,
+) -> Result<String> {
+  let pattern = format!("{version_prefix}/v*");
+  let mut versions: Vec<(u32, u32, u32)> = repo
+    .tag_names(Some(&pattern))?
+    .iter()
+    .flatten()
+    .filter_map(|tag| {
+      let stripped = tag.strip_prefix(&format!("{version_prefix}/v"))?;
+      // Only match pure X.Y.Z (no build counter suffix)
+      let parts: Vec<&str> = stripped.split('.').collect();
+      if parts.len() != 3 {
+        return None;
+      }
+      let major = parts[0].parse::<u32>().ok()?;
+      let minor = parts[1].parse::<u32>().ok()?;
+      let patch = parts[2].parse::<u32>().ok()?;
+      Some((major, minor, patch))
+    })
+    .collect();
+
+  versions.sort_by(|a, b| b.cmp(a));
+
+  let (major, minor, patch) = versions.into_iter().next().unwrap_or((0, 0, 0));
+
+  let patch_v = format!("v{major}.{minor}.{}", patch + 1);
+  let minor_v = format!("v{major}.{}.0", minor + 1);
+  let major_v = format!("v{}.0.0", major + 1);
+
+  let items = [
+    format!("patch  → {patch_v}"),
+    format!("minor  → {minor_v}"),
+    format!("major  → {major_v}"),
+  ];
+
+  let theme = dialoguer::theme::ColorfulTheme {
+    active_item_style: dialoguer::console::Style::new().for_stderr().red(),
+    active_item_prefix: dialoguer::console::style(">".to_string())
+      .for_stderr()
+      .red(),
+    ..dialoguer::theme::ColorfulTheme::default()
+  };
+
+  let idx = dialoguer::Select::with_theme(&theme)
+    .with_prompt(format!("select version bump for '{version_prefix}'"))
+    .items(&items)
+    .default(0)
+    .interact_on(&dialoguer::console::Term::stderr())?;
+
+  let version_str = match idx {
+    0 => patch_v,
+    1 => minor_v,
+    _ => major_v,
+  };
+
+  let _ = repo_root; // available for future use
+  Ok(format!("{version_prefix}/{version_str}"))
+}
+
+/// Call a custom version script, capture its stdout as the full tag.
+/// The script receives DOGMA_VERSION_PREFIX as an env var.
+pub fn next_custom(
+  script_path: &str,
+  version_prefix: &str,
+  repo_root: &std::path::Path,
+) -> Result<String> {
+  let abs = repo_root.join(script_path);
+  if !abs.exists() {
+    anyhow::bail!("version_script not found: {script_path}");
+  }
+
+  let out = std::process::Command::new(&abs)
+    .env("DOGMA_VERSION_PREFIX", version_prefix)
+    .current_dir(repo_root)
+    .output()
+    .with_context(|| format!("failed to run version_script: {script_path}"))?;
+
+  if !out.status.success() {
+    anyhow::bail!("version_script failed: {script_path}");
+  }
+
+  let tag = String::from_utf8(out.stdout)
+    .context("version_script output is not valid UTF-8")?
+    .trim()
+    .to_string();
+
+  if tag.is_empty() {
+    anyhow::bail!("version_script produced empty output: {script_path}");
+  }
+
+  Ok(tag)
 }
 
 // ---------------------------------------------------------------------------
 // Tag operations
 // ---------------------------------------------------------------------------
 
-pub fn list_deploy_tags(repo: &Repository) -> Result<Vec<String>> {
+/// List all `<prefix>/v*` tags, sorted newest-first.
+pub fn list_pipeline_tags(
+  repo: &Repository,
+  version_prefix: &str,
+) -> Result<Vec<String>> {
   let mut tags: Vec<String> = repo
-    .tag_names(Some("deploy/*"))?
+    .tag_names(Some(&format!("{version_prefix}/v*")))?
     .iter()
     .flatten()
     .map(str::to_string)
     .collect();
 
-  // Sort newest first by semver-like comparison
   tags.sort_by(|a, b| b.cmp(a));
   Ok(tags)
 }
 
-/// Returns deploy tags sorted newest-first, each paired with a formatted date
-/// string (`YYYY-MM-DD`). Falls back to the commit date when the tag is
-/// lightweight (no tag object), and to an empty string on any error.
-pub fn list_deploy_tags_with_date(
+/// Returns pipeline tags sorted newest-first, each paired with a human-readable
+/// relative date string. Falls back to empty string on any error.
+pub fn list_pipeline_tags_with_date(
   repo: &Repository,
+  version_prefix: &str,
 ) -> Result<Vec<(String, String)>> {
-  let tags = list_deploy_tags(repo)?;
+  let tags = list_pipeline_tags(repo, version_prefix)?;
   let pairs = tags
     .into_iter()
     .map(|name| {
