@@ -34,26 +34,52 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   let config = crate::config::normalize::normalize(repo_root)?;
   crate::config::validate::validate(&config)?;
 
-  let pipeline = config
-    .pipeline
-    .iter()
-    .find(|p| p.name == opts.pipeline_name)
-    .ok_or_else(|| {
-      anyhow::anyhow!(
-        "pipeline '{}' not found in dogma.yml",
-        opts.pipeline_name
-      )
-    })?
-    .clone();
+  // When no pipelines are declared in dogma.yml the first positional arg is
+  // the env (not the pipeline name) and a default nixos pipeline is used.
+  let (pipeline, env, opts) = if config.pipeline.is_empty() {
+    let shifted_env = opts.pipeline_name.clone();
+    let shifted_host = opts.env.clone();
+    let opts = PipelineOptions {
+      pipeline_name: "default".to_string(),
+      env: Some(shifted_env.clone()),
+      host: shifted_host.or(opts.host),
+      ..opts
+    };
+    let default_pipeline = PipelineConfig {
+      name: "default".to_string(),
+      pipeline_type: PipelineType::Nixos,
+      version_prefix: "deploy".to_string(),
+      version_scheme: VersionScheme::Calver,
+      version_script: None,
+      deployed_prefix: "deployed".to_string(),
+      command: None,
+      env: Some(shifted_env.clone()),
+      hooks: Default::default(),
+    };
+    (default_pipeline, shifted_env, opts)
+  } else {
+    let pipeline = config
+      .pipeline
+      .iter()
+      .find(|p| p.name == opts.pipeline_name)
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "pipeline '{}' not found in dogma.yml",
+          opts.pipeline_name
+        )
+      })?
+      .clone();
 
-  let env: String = match opts.env {
-    Some(e) => e,
-    None => pipeline.env.clone().ok_or_else(|| {
-      anyhow::anyhow!(
-        "pipeline '{}': no env specified and no default env configured",
-        pipeline.name
-      )
-    })?,
+    let env: String = match opts.env.clone() {
+      Some(e) => e,
+      None => pipeline.env.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+          "pipeline '{}': no env specified and no default env configured",
+          pipeline.name
+        )
+      })?,
+    };
+    (pipeline, env, opts)
   };
 
   if !config.env.contains(&env) {
