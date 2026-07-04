@@ -246,7 +246,7 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
     }
   };
 
-  let _guard = DetachGuard {
+  let guard = DetachGuard {
     repo_root,
     original_ref: original_ref.clone(),
     detached,
@@ -336,7 +336,16 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
     &opts.pipeline_name,
   )?;
 
-  log_step!("pipeline complete {} ({version})", env);
+  // Drop explicitly so branch restoration (and its log line) happens before
+  // the final success line, which must always print last.
+  drop(guard);
+
+  if config.pipeline.is_empty() {
+    log_step!("pipeline succeeded: {env} ({version})");
+  } else {
+    log_step!("pipeline succeeded: {env} ({version}) [{}]", pipeline.name);
+  }
+
   Ok(())
 }
 
