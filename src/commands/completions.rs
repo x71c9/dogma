@@ -25,6 +25,10 @@ _dogma_list_hosts() {
     dogma --list-hosts 2>/dev/null
 }
 
+_dogma_list_pipelines() {
+    dogma --list-pipelines 2>/dev/null
+}
+
 _dogma_completions() {
     local cur prev words cword
     _init_completion || return
@@ -51,19 +55,29 @@ _dogma_completions() {
             esac
             ;;
         deploy)
-            case $cword in
-                2) COMPREPLY=($(compgen -W "$(_dogma_list_envs)" -- "$cur")) ;;
-                3)
-                    if [[ "$cur" == -* ]]; then
-                        COMPREPLY=($(compgen -W "--new --latest --version --skip-infra --skip-sops --refetch -m" -- "$cur"))
-                    else
-                        COMPREPLY=($(compgen -W "$(_dogma_list_hosts)" -- "$cur"))
-                    fi
-                    ;;
-                *)
-                    COMPREPLY=($(compgen -W "--new --latest --version --skip-infra --skip-sops --refetch -m" -- "$cur"))
-                    ;;
-            esac
+            # If dogma.yml declares no pipelines, the pipeline-name arg is
+            # skipped and `deploy` takes just <env> [<host>].
+            local pipelines env_word host_word
+            pipelines="$(_dogma_list_pipelines)"
+            if [[ -n "$pipelines" ]]; then
+                env_word=3
+                host_word=4
+            else
+                env_word=2
+                host_word=3
+            fi
+
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--new --latest --version --skip-infra --skip-sops --refetch -m" -- "$cur"))
+            elif [[ -n "$pipelines" && $cword -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$pipelines" -- "$cur"))
+            elif [[ $cword -eq $env_word ]]; then
+                COMPREPLY=($(compgen -W "$(_dogma_list_envs)" -- "$cur"))
+            elif [[ $cword -eq $host_word ]]; then
+                COMPREPLY=($(compgen -W "$(_dogma_list_hosts)" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "--new --latest --version --skip-infra --skip-sops --refetch -m" -- "$cur"))
+            fi
             ;;
         infra)
             if [[ $cword -eq 2 ]]; then
@@ -112,6 +126,12 @@ _dogma_hosts() {
     _describe 'host' hosts
 }
 
+_dogma_pipelines() {
+    local -a pipelines
+    pipelines=(${(f)"$(dogma --list-pipelines 2>/dev/null)"})
+    _describe 'pipeline' pipelines
+}
+
 _dogma() {
     local state
 
@@ -145,16 +165,32 @@ _dogma() {
                         '4: :_message "output key"'
                     ;;
                 deploy)
-                    _arguments \
-                        '2: :_dogma_envs' \
-                        '3: :_dogma_hosts' \
-                        '--new[create new version]' \
-                        '--latest[use latest tag]' \
-                        '--version[use specific tag]:tag' \
-                        '--skip-infra[skip infra refresh]' \
-                        '--skip-sops[skip sops regeneration]' \
-                        '--refetch[clear caches]' \
-                        '-m[commit message]:message'
+                    # If dogma.yml declares no pipelines, the pipeline-name
+                    # arg is skipped and `deploy` takes just <env> [<host>].
+                    if [[ -n "$(dogma --list-pipelines 2>/dev/null)" ]]; then
+                        _arguments \
+                            '2: :_dogma_pipelines' \
+                            '3: :_dogma_envs' \
+                            '4: :_dogma_hosts' \
+                            '--new[create new version]' \
+                            '--latest[use latest tag]' \
+                            '--version[use specific tag]:tag' \
+                            '--skip-infra[skip infra refresh]' \
+                            '--skip-sops[skip sops regeneration]' \
+                            '--refetch[clear caches]' \
+                            '-m[commit message]:message'
+                    else
+                        _arguments \
+                            '2: :_dogma_envs' \
+                            '3: :_dogma_hosts' \
+                            '--new[create new version]' \
+                            '--latest[use latest tag]' \
+                            '--version[use specific tag]:tag' \
+                            '--skip-infra[skip infra refresh]' \
+                            '--skip-sops[skip sops regeneration]' \
+                            '--refetch[clear caches]' \
+                            '-m[commit message]:message'
+                    fi
                     ;;
                 infra)
                     _arguments \
@@ -191,6 +227,15 @@ function __dogma_hosts
     dogma --list-hosts 2>/dev/null
 end
 
+function __dogma_pipelines
+    dogma --list-pipelines 2>/dev/null
+end
+
+function __dogma_has_pipelines
+    set -l pipelines (__dogma_pipelines)
+    test (count $pipelines) -gt 0
+end
+
 set -l cmds credentials env output shell deploy infra completions
 
 # top-level subcommands
@@ -219,10 +264,18 @@ complete -c dogma -f -n "__fish_seen_subcommand_from output; and test (count (co
 complete -c dogma -f -n "__fish_seen_subcommand_from output; and test (count (commandline -opc)) -eq 3" \
     -a "(__dogma_units)" -d 'unit'
 
-# deploy: <env> then optional <host>, then flags
-complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and test (count (commandline -opc)) -eq 2" \
+# deploy: [<pipeline>] <env> then optional <host>, then flags.
+# If dogma.yml declares no pipelines, the pipeline-name arg is skipped and
+# `deploy` takes just <env> [<host>].
+complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and __dogma_has_pipelines; and test (count (commandline -opc)) -eq 2" \
+    -a "(__dogma_pipelines)" -d 'pipeline'
+complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and __dogma_has_pipelines; and test (count (commandline -opc)) -eq 3" \
     -a "(__dogma_envs)" -d 'environment'
-complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and test (count (commandline -opc)) -eq 3" \
+complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and __dogma_has_pipelines; and test (count (commandline -opc)) -eq 4" \
+    -a "(__dogma_hosts)" -d 'host'
+complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and not __dogma_has_pipelines; and test (count (commandline -opc)) -eq 2" \
+    -a "(__dogma_envs)" -d 'environment'
+complete -c dogma -f -n "__fish_seen_subcommand_from deploy; and not __dogma_has_pipelines; and test (count (commandline -opc)) -eq 3" \
     -a "(__dogma_hosts)" -d 'host'
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l new          -d 'create new version'
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l latest       -d 'use latest tag'

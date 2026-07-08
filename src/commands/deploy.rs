@@ -153,6 +153,10 @@ pub fn verify_secrets_committed(
 ) -> Result<()> {
   let nix_secrets = config.nix.secrets.trim_start_matches("./");
   let repo = git::open(repo_root)?;
+  let index = repo.index()?;
+  // include_untracked=false: an untracked secret file is already caught by
+  // the index check below, so there's no need to scan untracked files too.
+  let dirty = git::dirty_files(&repo, false)?;
 
   for (host_name, machine) in &config.machines {
     for group in &machine.secrets {
@@ -160,15 +164,21 @@ pub fn verify_secrets_committed(
         repo_root.join(format!("{nix_secrets}/{env}/{host_name}/{group}.yaml"));
       if !secret_file.exists() {
         bail!(
-          "secret not committed for {env}: {}\nRun: dogma pipeline server {env} --new",
+          "secret not committed for {env}: {}\nRun: dogma deploy {env} --new",
           secret_file.display()
         );
       }
       let rel = secret_file.strip_prefix(repo_root)?;
-      let index = repo.index()?;
       if index.get_path(rel, 0).is_none() {
         bail!(
-          "secret not committed for {env}: {}\nRun: dogma pipeline server {env} --new",
+          "secret not committed for {env}: {}\nRun: dogma deploy {env} --new",
+          secret_file.display()
+        );
+      }
+      let rel_str = rel.to_string_lossy();
+      if dirty.files.iter().any(|f| f.path == rel_str) {
+        bail!(
+          "secret has uncommitted changes for {env}: {}\nThe working tree no longer matches what's committed — commit or discard the change, or re-run: dogma deploy {env} --new",
           secret_file.display()
         );
       }

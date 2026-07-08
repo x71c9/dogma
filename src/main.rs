@@ -30,7 +30,7 @@ fn run() -> Result<()> {
   // --list-* flags: read dogma.yml and print completions, then exit.
   // These don't need the full repo-root walk to be meaningful — they just
   // need to find dogma.yml somewhere up the tree.
-  if cli.list_envs || cli.list_units || cli.list_hosts {
+  if cli.list_envs || cli.list_units || cli.list_hosts || cli.list_pipelines {
     let repo_root =
       find_repo_root().unwrap_or_else(|_| std::env::current_dir().unwrap());
     let config =
@@ -81,6 +81,12 @@ fn run() -> Result<()> {
       }
     }
 
+    if cli.list_pipelines {
+      for p in &config.pipeline {
+        println!("{}", p.name);
+      }
+    }
+
     return Ok(());
   }
 
@@ -114,7 +120,7 @@ fn run() -> Result<()> {
     Commands::Shell { env } => {
       commands::shell::run(&repo_root, &env)?;
     }
-    Commands::Pipeline {
+    Commands::Deploy {
       pipeline,
       env,
       host,

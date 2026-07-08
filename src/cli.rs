@@ -23,6 +23,10 @@ pub struct Cli {
   #[arg(long, global = true, hide = true)]
   pub list_hosts: bool,
 
+  /// Print declared pipeline names (for shell completion)
+  #[arg(long, global = true, hide = true)]
+  pub list_pipelines: bool,
+
   #[command(subcommand)]
   pub command: Option<Commands>,
 }
@@ -57,13 +61,8 @@ pub enum Commands {
     env: String,
   },
 
-  /// Run a named pipeline (build, publish, etc.)
-  #[command(
-    visible_alias = "deploy",
-    visible_alias = "release",
-    visible_alias = "publish"
-  )]
-  Pipeline {
+  /// Deploy (run a named pipeline: build, publish, etc.)
+  Deploy {
     /// Pipeline name as declared in dogma.yml [[pipeline]]
     pipeline: String,
     /// Environment name (e.g. dev, prod) — falls back to pipeline default_env if omitted
