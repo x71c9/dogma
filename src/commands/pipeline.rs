@@ -288,34 +288,67 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   // -----------------------------------------------------------------------
   log_step!("pipeline [4/6] deploy");
   let is_new = matches!(opts.mode, Mode::New);
-  let deployed_targets = run_deploy_command(
-    &pipeline,
-    &DeployCtx {
-      config: &config,
-      repo_root,
-      env: &env,
-      version: &version,
-      pipeline_name: &opts.pipeline_name,
-      is_new,
-      skip_infra: opts.skip_infra,
-      refetch: opts.refetch,
-      host_filter: opts.host.as_deref(),
-    },
-  )?;
+  let ctx = DeployCtx {
+    config: &config,
+    repo_root,
+    env: &env,
+    version: &version,
+    pipeline_name: &opts.pipeline_name,
+    is_new,
+    skip_infra: opts.skip_infra,
+    refetch: opts.refetch,
+    host_filter: opts.host.as_deref(),
+  };
 
-  // Commit any files written by the deploy step (e.g. nixos encrypted secrets).
-  if is_new {
-    let deploy_dirty = git::dirty_files(&repo, false)?;
-    if !deploy_dirty.is_empty() {
-      if created_deploy_commit {
-        git::amend_all(&repo)?;
-        log_info!("pipeline folded deploy changes into deploy commit");
-      } else {
-        git::commit_all(&repo, &format!("chore: release {version}"))?;
-        log_info!("pipeline committed: chore: release {version}");
+  let deployed_targets = match &pipeline.pipeline_type {
+    PipelineType::Nixos => {
+      // Write infra cache + encrypt secrets first (no SSH yet), then commit
+      // before touching any host — a failed nixos-rebuild should never leave
+      // encrypted secrets dirty on disk with no git record of them.
+      prepare_nixos_deploy(&ctx)?;
+
+      if is_new {
+        let prepare_dirty = git::dirty_files(&repo, false)?;
+        if !prepare_dirty.is_empty() {
+          if created_deploy_commit {
+            git::amend_all(&repo)?;
+            log_info!("pipeline folded deploy changes into deploy commit");
+          } else {
+            git::commit_all(&repo, &format!("chore: release {version}"))?;
+            log_info!("pipeline committed: chore: release {version}");
+          }
+        }
       }
+
+      deploy_nixos_hosts(&ctx)?
     }
-  }
+    PipelineType::Custom => {
+      run_custom_command(
+        &pipeline,
+        ctx.repo_root,
+        ctx.env,
+        ctx.version,
+        ctx.pipeline_name,
+      )?;
+
+      // Custom commands are a single opaque step — commit whatever they
+      // produced after the fact, same as before.
+      if is_new {
+        let deploy_dirty = git::dirty_files(&repo, false)?;
+        if !deploy_dirty.is_empty() {
+          if created_deploy_commit {
+            git::amend_all(&repo)?;
+            log_info!("pipeline folded deploy changes into deploy commit");
+          } else {
+            git::commit_all(&repo, &format!("chore: release {version}"))?;
+            log_info!("pipeline committed: chore: release {version}");
+          }
+        }
+      }
+
+      vec![]
+    }
+  };
 
   // -----------------------------------------------------------------------
   // Step 5: git tags + push
@@ -391,25 +424,6 @@ struct DeployCtx<'a> {
   host_filter: Option<&'a str>,
 }
 
-fn run_deploy_command(
-  pipeline: &PipelineConfig,
-  ctx: &DeployCtx<'_>,
-) -> Result<Vec<String>> {
-  match &pipeline.pipeline_type {
-    PipelineType::Custom => {
-      run_custom_command(
-        pipeline,
-        ctx.repo_root,
-        ctx.env,
-        ctx.version,
-        ctx.pipeline_name,
-      )?;
-      Ok(vec![])
-    }
-    PipelineType::Nixos => run_nixos_deploy(ctx),
-  }
-}
-
 fn run_custom_command(
   pipeline: &PipelineConfig,
   repo_root: &Path,
@@ -453,7 +467,10 @@ fn run_custom_command(
   Ok(())
 }
 
-fn run_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
+/// Refreshes infra cache and (on `--new`) generates + encrypts secrets.
+/// Writes files to disk but never touches a host over SSH, so the pipeline
+/// can commit the result before anything is actually deployed.
+fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
   use super::deploy;
 
   let config = ctx.config;
@@ -462,19 +479,14 @@ fn run_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
   let is_new = ctx.is_new;
   let skip_infra = ctx.skip_infra;
   let refetch = ctx.refetch;
-  let host_filter = ctx.host_filter;
 
   deploy::check_all_deps()?;
 
-  let host_list: Vec<String> = match host_filter {
-    Some(h) => {
-      if !config.machines.contains_key(h) {
-        bail!("host '{h}' is not declared in dogma.yml");
-      }
-      vec![h.to_string()]
+  if let Some(h) = ctx.host_filter {
+    if !config.machines.contains_key(h) {
+      bail!("host '{h}' is not declared in dogma.yml");
     }
-    None => config.machines.keys().cloned().collect(),
-  };
+  }
 
   let all_envs: Vec<String> = config.env.clone();
 
@@ -548,7 +560,34 @@ fn run_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
     deploy::verify_secrets_committed(config, repo_root, env)?;
   }
 
-  // Per-host deploy
+  Ok(())
+}
+
+/// SSHes into each target host and runs the actual deploy. Must only be
+/// called after any secrets/config changes from `prepare_nixos_deploy` have
+/// been committed.
+fn deploy_nixos_hosts(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
+  use super::deploy;
+
+  let config = ctx.config;
+  let repo_root = ctx.repo_root;
+  let env = ctx.env;
+
+  let host_list: Vec<String> = match ctx.host_filter {
+    Some(h) => vec![h.to_string()],
+    None => config.machines.keys().cloned().collect(),
+  };
+
+  let all_envs: Vec<String> = config.env.clone();
+  let all_env_creds: Vec<(String, Vec<(String, String)>)> = {
+    let mut v = Vec::new();
+    for e in &all_envs {
+      let creds = infra_output::resolve_infra_credentials(config, e)?;
+      v.push((e.clone(), creds));
+    }
+    v
+  };
+
   let infra_creds = deploy::lookup_creds(&all_env_creds, env);
   let mut deployed_targets: Vec<String> = Vec::new();
   for host in &host_list {
