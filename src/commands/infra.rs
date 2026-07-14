@@ -41,6 +41,55 @@ pub fn apply(
   )
 }
 
+/// Standalone `dogma infra init <env> <unit>`: always re-runs `<cli> init`,
+/// bypassing the already-initialized heuristic. Escape hatch for cases the
+/// skip detection can't see (deleted .terraform/, stale plugin cache, etc.).
+pub fn init(
+  repo_root: &Path,
+  env: &str,
+  unit: &str,
+  migrate_state: bool,
+  upgrade: bool,
+) -> Result<()> {
+  let config = normalize(repo_root)?;
+  validate(&config)?;
+
+  if !config.env.contains(&env.to_string()) {
+    bail!("env '{env}' is not declared in dogma.yml");
+  }
+
+  let infra = config
+    .infra
+    .as_ref()
+    .ok_or_else(|| anyhow::anyhow!("no 'infra' block in dogma.yml"))?;
+
+  let cli = &infra.cli;
+  check_dep(cli, &format!("install {cli} and make sure it is on PATH"))?;
+
+  let unit_dir = repo_root
+    .join(infra.path.trim_start_matches("./"))
+    .join(unit);
+  if !unit_dir.is_dir() {
+    bail!("unit '{unit}' not found: {}", unit_dir.display());
+  }
+
+  let credentials = resolve_credentials(&config, env)?;
+
+  log_step!("infra init {unit}");
+  init_unit(
+    &config,
+    repo_root,
+    cli,
+    &unit_dir,
+    env,
+    unit,
+    migrate_state,
+    upgrade,
+    true,
+    &credentials,
+  )
+}
+
 pub fn destroy(
   repo_root: &Path,
   env: &str,
@@ -308,6 +357,7 @@ fn run_init(
     args.unit,
     args.migrate_state,
     args.upgrade,
+    false,
     args.credentials,
   )
 }
@@ -326,6 +376,7 @@ pub fn init_unit(
   unit: &str,
   migrate_state: bool,
   upgrade: bool,
+  force: bool,
   credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
@@ -344,11 +395,15 @@ pub fn init_unit(
     .unwrap_or_else(|| format!("{env}/{unit}/terraform.tfstate"));
 
   // Skip init when the unit is already initialized for this exact backend
-  // (same bucket + state key). `-migrate-state` and `-upgrade` always re-run
-  // so lock file or state moves are never silently skipped.
-  if !migrate_state
+  // (same bucket + state key) AND every provider pinned in the lock file is
+  // present in the local plugin cache. `-migrate-state` and `-upgrade` always
+  // re-run so lock file or state moves are never silently skipped; `force`
+  // (dogma infra init) bypasses the heuristic entirely.
+  if !force
+    && !migrate_state
     && !upgrade
     && backend_already_correct(unit_dir, &backend_conf, &state_key_value)
+    && providers_cached(unit_dir)
   {
     log_dim!("infra {unit} already initialized for {env} — skipping init");
     return Ok(());
@@ -413,6 +468,58 @@ fn backend_already_correct(
     && cfg["key"].as_str() == Some(state_key)
 }
 
+/// True when every provider pinned in the unit's `.terraform.lock.hcl` has a
+/// package cached under `.terraform/providers/<addr>/<version>/`. A lock file
+/// that changed since the last init (new module, pull from another machine)
+/// leaves the backend pointing at the right place but the plugin cache stale,
+/// and apply would fail with "Required plugins are not installed". A missing
+/// or unparseable lock file — or one pinning no providers — returns false, so
+/// we fall back to running init.
+fn providers_cached(unit_dir: &Path) -> bool {
+  let Ok(raw) = std::fs::read_to_string(unit_dir.join(".terraform.lock.hcl"))
+  else {
+    return false;
+  };
+
+  // Lock file blocks look like:
+  //   provider "registry.opentofu.org/hashicorp/random" {
+  //     version = "3.9.0"
+  //     ...
+  // Pair each block header with the first following `version` line.
+  let mut provider: Option<String> = None;
+  let mut seen_any = false;
+  for line in raw.lines() {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("provider") {
+      provider = first_quoted(rest);
+    } else if line.starts_with("version") {
+      let Some(addr) = provider.take() else {
+        continue;
+      };
+      let Some(version) = first_quoted(line) else {
+        return false;
+      };
+      seen_any = true;
+      if !unit_dir
+        .join(".terraform/providers")
+        .join(&addr)
+        .join(&version)
+        .is_dir()
+      {
+        return false;
+      }
+    }
+  }
+  seen_any
+}
+
+/// First double-quoted substring of `s`, if any.
+fn first_quoted(s: &str) -> Option<String> {
+  let start = s.find('"')? + 1;
+  let end = start + s[start..].find('"')?;
+  Some(s[start..end].to_string())
+}
+
 /// Extract just the `bucket` value from a backend.conf (HCL-ish `key = "value"`
 /// lines). Returns None if absent. Other lines are ignored — backend.conf may
 /// hold credentials, so nothing else is read out of it.
@@ -431,7 +538,6 @@ fn backend_conf_bucket(backend_conf: &Path) -> Option<String> {
   }
   None
 }
-
 fn run_subcommand(
   config: &DogmaConfig,
   repo_root: &Path,
@@ -460,4 +566,87 @@ fn run_subcommand(
     bail!("'{cli} {subcommand}' failed");
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::providers_cached;
+  use std::fs;
+  use std::path::PathBuf;
+
+  const LOCK: &str = r#"
+# This file is maintained automatically by "tofu init".
+
+provider "registry.opentofu.org/hashicorp/random" {
+  version     = "3.9.0"
+  constraints = "~> 3.0"
+  hashes = [
+    "h1:aaaa",
+    "zh:bbbb",
+  ]
+}
+
+provider "registry.opentofu.org/hetznercloud/hcloud" {
+  version = "1.66.0"
+  hashes = [
+    "h1:cccc",
+  ]
+}
+"#;
+
+  fn fixture(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir()
+      .join(format!("dogma-test-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+  }
+
+  fn cache_provider(unit_dir: &std::path::Path, addr: &str, version: &str) {
+    fs::create_dir_all(
+      unit_dir
+        .join(".terraform/providers")
+        .join(addr)
+        .join(version),
+    )
+    .unwrap();
+  }
+
+  #[test]
+  fn all_providers_cached() {
+    let dir = fixture("all-cached");
+    fs::write(dir.join(".terraform.lock.hcl"), LOCK).unwrap();
+    cache_provider(&dir, "registry.opentofu.org/hashicorp/random", "3.9.0");
+    cache_provider(&dir, "registry.opentofu.org/hetznercloud/hcloud", "1.66.0");
+    assert!(providers_cached(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn missing_provider_package() {
+    let dir = fixture("missing-pkg");
+    fs::write(dir.join(".terraform.lock.hcl"), LOCK).unwrap();
+    cache_provider(&dir, "registry.opentofu.org/hashicorp/random", "3.9.0");
+    assert!(!providers_cached(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn wrong_version_cached() {
+    let dir = fixture("wrong-version");
+    fs::write(dir.join(".terraform.lock.hcl"), LOCK).unwrap();
+    cache_provider(&dir, "registry.opentofu.org/hashicorp/random", "3.8.0");
+    cache_provider(&dir, "registry.opentofu.org/hetznercloud/hcloud", "1.66.0");
+    assert!(!providers_cached(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn missing_or_empty_lock_file() {
+    let dir = fixture("no-lock");
+    assert!(!providers_cached(&dir));
+    fs::write(dir.join(".terraform.lock.hcl"), "").unwrap();
+    assert!(!providers_cached(&dir));
+    fs::remove_dir_all(&dir).unwrap();
+  }
 }

@@ -179,6 +179,17 @@ Same as `apply` but runs `tofu destroy`.
 
 ---
 
+### `dogma infra init <env> <unit>`
+
+Runs: normalize → validate → `tofu init`. Always re-runs init, bypassing the already-initialized check that `apply`/`destroy` use. Escape hatch when the local `.terraform/` is out of sync in a way the check can't detect (deleted plugin cache, manual edits).
+
+```bash
+dogma infra init dev hetzner
+dogma infra init dev hetzner --upgrade
+```
+
+---
+
 ### `dogma deploy <env> [host]`
 
 Full deploy pipeline.

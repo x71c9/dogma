@@ -184,6 +184,14 @@ fn run() -> Result<()> {
           upgrade,
         )?;
       }
+      InfraCommands::Init {
+        env,
+        unit,
+        migrate_state,
+        upgrade,
+      } => {
+        commands::infra::init(&repo_root, &env, &unit, migrate_state, upgrade)?;
+      }
       InfraCommands::Auth { env } => {
         let config = config::normalize::normalize(&repo_root)?;
         let vars = commands::credentials::collect_credentials(&config, &env)?;
