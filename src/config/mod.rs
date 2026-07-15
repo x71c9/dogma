@@ -34,6 +34,12 @@ pub struct DogmaConfig {
 
   #[serde(default)]
   pub pipeline: Vec<PipelineConfig>,
+
+  /// Hooks for the implicit default pipeline, used only when `pipeline` is
+  /// empty. Ignored (with a warning) when pipelines are declared — each
+  /// pipeline defines its own hooks.
+  #[serde(default)]
+  pub hooks: PipelineHooks,
 }
 
 // ---------------------------------------------------------------------------

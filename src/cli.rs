@@ -140,6 +140,20 @@ pub enum InfraCommands {
     #[arg(long, conflicts_with = "migrate_state")]
     upgrade: bool,
   },
+  /// Normalize, validate, then run tofu init (always re-runs, even if the
+  /// unit looks already initialized)
+  Init {
+    /// Environment name
+    env: String,
+    /// Infra unit name
+    unit: String,
+    /// Pass -migrate-state to tofu init instead of -reconfigure
+    #[arg(long, conflicts_with = "upgrade")]
+    migrate_state: bool,
+    /// Pass -upgrade to tofu init (updates provider lock file)
+    #[arg(long, conflicts_with = "migrate_state")]
+    upgrade: bool,
+  },
   /// Spawn a shell with infra credentials loaded
   Auth {
     /// Environment name

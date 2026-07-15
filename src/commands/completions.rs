@@ -81,13 +81,13 @@ _dogma_completions() {
             ;;
         infra)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=($(compgen -W "apply destroy" -- "$cur"))
+                COMPREPLY=($(compgen -W "apply destroy init auth" -- "$cur"))
             elif [[ $cword -eq 3 ]]; then
                 COMPREPLY=($(compgen -W "$(_dogma_list_envs)" -- "$cur"))
             elif [[ $cword -eq 4 ]]; then
                 COMPREPLY=($(compgen -W "$(_dogma_list_units)" -- "$cur"))
             elif [[ $cword -ge 5 ]]; then
-                COMPREPLY=($(compgen -W "--migrate-state" -- "$cur"))
+                COMPREPLY=($(compgen -W "--migrate-state --upgrade" -- "$cur"))
             fi
             ;;
         completions)
@@ -194,10 +194,11 @@ _dogma() {
                     ;;
                 infra)
                     _arguments \
-                        '2: :(apply destroy)' \
+                        '2: :(apply destroy init auth)' \
                         '3: :_dogma_envs' \
                         '4: :_dogma_units' \
-                        '--migrate-state[pass -migrate-state to init]'
+                        '--migrate-state[pass -migrate-state to init]' \
+                        '--upgrade[pass -upgrade to init]'
                     ;;
                 completions)
                     _arguments '2: :(bash zsh fish)'
@@ -285,14 +286,15 @@ complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l skip-sops    -d 
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l refetch      -d 'clear caches'
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -s m            -d 'commit message'
 
-# infra: apply/destroy, then <env>, then <unit>
+# infra: apply/destroy/init/auth, then <env>, then <unit>
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 2" \
-    -a "apply destroy"
+    -a "apply destroy init auth"
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 3" \
     -a "(__dogma_envs)" -d 'environment'
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 4" \
     -a "(__dogma_units)" -d 'unit'
 complete -c dogma -f -n "__fish_seen_subcommand_from infra" -l migrate-state -d 'migrate state'
+complete -c dogma -f -n "__fish_seen_subcommand_from infra" -l upgrade -d 'upgrade providers'
 
 # completions: shell name
 complete -c dogma -f -n "__fish_seen_subcommand_from completions" -a "bash zsh fish"

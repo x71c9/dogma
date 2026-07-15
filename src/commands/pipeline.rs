@@ -54,7 +54,7 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       deployed_prefix: "deployed".to_string(),
       command: None,
       env: Some(shifted_env.clone()),
-      hooks: Default::default(),
+      hooks: config.hooks.clone(),
     };
     (default_pipeline, shifted_env, opts)
   } else {

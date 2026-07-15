@@ -48,6 +48,7 @@ fn run() -> Result<()> {
           nix: Default::default(),
           deploy: Default::default(),
           pipeline: Default::default(),
+          hooks: Default::default(),
         }
       });
 
@@ -183,6 +184,14 @@ fn run() -> Result<()> {
           migrate_state,
           upgrade,
         )?;
+      }
+      InfraCommands::Init {
+        env,
+        unit,
+        migrate_state,
+        upgrade,
+      } => {
+        commands::infra::init(&repo_root, &env, &unit, migrate_state, upgrade)?;
       }
       InfraCommands::Auth { env } => {
         let config = config::normalize::normalize(&repo_root)?;
