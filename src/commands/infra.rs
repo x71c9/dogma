@@ -417,24 +417,52 @@ pub fn init_unit(
     "-reconfigure"
   };
 
-  let state_key = format!("key={state_key_value}");
-  let backend_conf_flag = format!("-backend-config={}", backend_conf.display());
+  let mut args = vec![
+    "init".to_string(),
+    reconfigure_flag.to_string(),
+    format!("-backend-config={}", backend_conf.display()),
+    format!("-backend-config=key={state_key_value}"),
+  ];
+  // -input=false keeps a captured run from silently blocking on a prompt
+  // nobody can see; -migrate-state must stay interactive (see below).
+  if !migrate_state {
+    args.push("-input=false".to_string());
+  }
 
-  let status = Command::new(cli)
+  log_info!("infra running: {cli} {}", args.join(" "));
+
+  let mut cmd = Command::new(cli);
+  cmd
     .current_dir(unit_dir)
-    .args([
-      "init",
-      reconfigure_flag,
-      &backend_conf_flag,
-      &format!("-backend-config={state_key}"),
-    ])
-    .envs(credentials.iter().cloned())
-    .status()
+    .args(&args)
+    .envs(credentials.iter().cloned());
+
+  // -migrate-state may prompt on stdin (copy existing state?), so its output
+  // must stream through untouched. Every other init runs captured: tofu's
+  // chatter is replaced by the dogma lines around it, and the full output is
+  // printed only when init fails.
+  if migrate_state {
+    let status = cmd
+      .status()
+      .with_context(|| format!("failed to run '{cli} init'"))?;
+    if !status.success() {
+      bail!("'{cli} init' failed for unit '{}'", unit_dir.display());
+    }
+    log_info!("infra {unit} initialized for {env}");
+    return Ok(());
+  }
+
+  let output = cmd
+    .output()
     .with_context(|| format!("failed to run '{cli} init'"))?;
 
-  if !status.success() {
+  if !output.status.success() {
+    io::stderr().write_all(&output.stdout)?;
+    io::stderr().write_all(&output.stderr)?;
     bail!("'{cli} init' failed for unit '{}'", unit_dir.display());
   }
+
+  log_info!("infra {unit} initialized for {env}");
   Ok(())
 }
 

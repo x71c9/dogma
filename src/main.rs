@@ -48,6 +48,7 @@ fn run() -> Result<()> {
           nix: Default::default(),
           deploy: Default::default(),
           pipeline: Default::default(),
+          hooks: Default::default(),
         }
       });
 
