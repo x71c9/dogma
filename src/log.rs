@@ -91,8 +91,19 @@ pub fn status_line(status: char, path: &str) {
 
 /// "[dogma] " prefix for inline prompts (no trailing newline). Use with
 /// `eprint!` so prompts match the bracketed style of info lines.
-pub fn prompt_prefix() -> String {
-  "[dogma] ".to_string()
+pub fn prompt_prefix() -> &'static str {
+  "[dogma] "
+}
+
+/// dogma's dialoguer theme: red `>` marker and red active item, on stderr.
+pub fn select_theme() -> dialoguer::theme::ColorfulTheme {
+  dialoguer::theme::ColorfulTheme {
+    active_item_style: dialoguer::console::Style::new().for_stderr().red(),
+    active_item_prefix: dialoguer::console::style(">".to_string())
+      .for_stderr()
+      .red(),
+    ..dialoguer::theme::ColorfulTheme::default()
+  }
 }
 
 /// Wraps `s` in cyan ANSI codes when colors are enabled; returns `s` unchanged otherwise.

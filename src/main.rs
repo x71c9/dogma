@@ -30,27 +30,12 @@ fn run() -> Result<()> {
   // --list-* flags: read dogma.yml and print completions, then exit.
   // These don't need the full repo-root walk to be meaningful — they just
   // need to find dogma.yml somewhere up the tree.
-  if cli.list_envs || cli.list_units || cli.list_hosts || cli.list_pipelines {
+  if cli.list_envs || cli.list_units || cli.list_pipelines {
     let repo_root =
       find_repo_root().unwrap_or_else(|_| std::env::current_dir().unwrap());
-    let config =
-      config::normalize::normalize(&repo_root).unwrap_or_else(|_| {
-        // Return an empty-ish config rather than error, so completion
-        // degrades gracefully when dogma.yml is absent or malformed.
-        config::DogmaConfig {
-          name: String::new(),
-          env: vec![],
-          admin: vec![],
-          vault: Default::default(),
-          machines: Default::default(),
-          secrets: Default::default(),
-          infra: None,
-          nix: Default::default(),
-          deploy: Default::default(),
-          pipeline: Default::default(),
-          hooks: Default::default(),
-        }
-      });
+    // Fall back to an empty config rather than erroring, so completion
+    // degrades gracefully when dogma.yml is absent or malformed.
+    let config = config::normalize::normalize(&repo_root).unwrap_or_default();
 
     if cli.list_envs {
       for e in &config.env {
@@ -73,12 +58,6 @@ fn run() -> Result<()> {
             }
           }
         }
-      }
-    }
-
-    if cli.list_hosts {
-      for name in config.machines.keys() {
-        println!("{name}");
       }
     }
 
@@ -122,9 +101,8 @@ fn run() -> Result<()> {
       commands::shell::run(&repo_root, &env)?;
     }
     Commands::Deploy {
-      pipeline,
       env,
-      host,
+      pipeline,
       new,
       latest,
       version,
@@ -144,9 +122,8 @@ fn run() -> Result<()> {
       commands::pipeline::run(
         &repo_root,
         PipelineOptions {
-          pipeline_name: pipeline,
           env,
-          host,
+          pipeline_name: pipeline,
           mode,
           skip_infra,
           refetch,
@@ -200,9 +177,8 @@ fn run() -> Result<()> {
         commands::shell::exec_shell(&env, vars)?;
       }
     },
-    Commands::Completions { shell } => {
-      commands::completions::run(&shell);
-    }
+    // Handled before find_repo_root() above.
+    Commands::Completions { .. } => unreachable!(),
   }
 
   if let Some(start) = start {

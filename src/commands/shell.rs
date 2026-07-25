@@ -44,8 +44,7 @@ fn write_bash_rcfile(env: &str) -> Result<std::path::PathBuf> {
   writeln!(f, r#"[ -f ~/.bashrc ] && source ~/.bashrc"#)?;
   writeln!(
     f,
-    r#"PROMPT_COMMAND='PS1="\[\e[31m\][dogma-{env} \t] \w \$ \[\e[0m\]"'"#,
-    env = env
+    r#"PROMPT_COMMAND='PS1="\[\e[31m\][dogma-{env} \t] \w \$ \[\e[0m\]"'"#
   )?;
   Ok(path)
 }

@@ -5,7 +5,6 @@ use super::{
   VersionScheme,
 };
 
-#[allow(dead_code)]
 pub fn validate(config: &DogmaConfig) -> Result<()> {
   let mut errors: Vec<String> = Vec::new();
 
@@ -158,6 +157,14 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
         "pipeline '{}': version_scheme = custom requires version_script",
         p.name
       ));
+    }
+    if let Some(env) = &p.env {
+      if !config.env.contains(env) {
+        errors.push(format!(
+          "pipeline '{}': env '{}' is not declared in dogma.yml",
+          p.name, env
+        ));
+      }
     }
   }
 
