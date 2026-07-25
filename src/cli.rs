@@ -19,10 +19,6 @@ pub struct Cli {
   #[arg(long, global = true, hide = true)]
   pub list_units: bool,
 
-  /// Print available machine names (for shell completion)
-  #[arg(long, global = true, hide = true)]
-  pub list_hosts: bool,
-
   /// Print declared pipeline names (for shell completion)
   #[arg(long, global = true, hide = true)]
   pub list_pipelines: bool,
@@ -63,12 +59,13 @@ pub enum Commands {
 
   /// Deploy (run a named pipeline: build, publish, etc.)
   Deploy {
-    /// Pipeline name as declared in dogma.yml [[pipeline]]
-    pipeline: String,
-    /// Environment name (e.g. dev, prod) — falls back to pipeline default_env if omitted
-    env: Option<String>,
-    /// Deploy to a specific host only (nixos type only)
-    host: Option<String>,
+    /// Environment name (e.g. dev, prod), or a pipeline name whose env
+    /// attribute is set
+    #[arg(value_name = "ENV|PIPELINE")]
+    env: String,
+    /// Pipeline name as declared in dogma.yml [[pipeline]] — required when
+    /// more than one pipeline is declared and the first argument is an env
+    pipeline: Option<String>,
     /// Create a new version, run hooks, commit, deploy, tag
     #[arg(long, conflicts_with_all = ["latest", "version"])]
     new: bool,

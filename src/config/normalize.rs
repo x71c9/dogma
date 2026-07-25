@@ -23,15 +23,6 @@ pub fn normalize(repo_root: &Path) -> Result<DogmaConfig> {
   Ok(config)
 }
 
-#[allow(dead_code)]
-pub fn load_expanded(repo_root: &Path) -> Result<DogmaConfig> {
-  let expanded_path = repo_root.join(".dogma/dogma-expanded.yml");
-  let raw = std::fs::read_to_string(&expanded_path).with_context(|| {
-    format!("expanded config not found: {}", expanded_path.display())
-  })?;
-  serde_yaml::from_str(&raw).context("failed to parse dogma-expanded.yml")
-}
-
 /// Serde ignores unknown fields, so a mistyped or misplaced key in dogma.yml
 /// is silently dropped — e.g. a `pre_deploy:` hook (kebab-case is required).
 /// Collect warnings for the schema levels where every key is fixed: top

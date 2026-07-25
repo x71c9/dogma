@@ -2,12 +2,64 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-use crate::commands::infra::{init_unit, resolve_credentials};
-use crate::config::DogmaConfig;
+use crate::commands::infra::{init_unit, resolve_credentials, InitOptions};
+use crate::config::{DogmaConfig, IpEntry};
 use crate::error::check_dep;
 use crate::{log_dim, log_info};
 
 const SENSITIVE_SENTINEL: &str = "__dogma_sensitive__";
+
+/// Resolved infra credentials for one env: (env name, VAR=value pairs).
+pub type EnvCreds = (String, Vec<(String, String)>);
+
+/// Resolve infra credentials for every declared env. Vault reads can be slow
+/// (e.g. `pass`), so callers should do this once and share the result.
+pub fn resolve_all_env_creds(config: &DogmaConfig) -> Result<Vec<EnvCreds>> {
+  config
+    .env
+    .iter()
+    .map(|e| Ok((e.clone(), resolve_credentials(config, e)?)))
+    .collect()
+}
+
+/// The credentials for `env` out of a pre-resolved set; empty if absent.
+pub fn lookup_creds<'a>(
+  env_creds: &'a [EnvCreds],
+  env: &str,
+) -> &'a [(String, String)] {
+  env_creds
+    .iter()
+    .find(|(e, _)| e == env)
+    .map(|(_, c)| c.as_slice())
+    .unwrap_or(&[])
+}
+
+/// Resolve a machine's IP for `env`: either the static value from dogma.yml
+/// or the cached infra output it points at.
+pub fn resolve_machine_ip(
+  config: &DogmaConfig,
+  repo_root: &Path,
+  host: &str,
+  env: &str,
+  credentials: &[(String, String)],
+) -> Result<String> {
+  let machine = config
+    .machines
+    .get(host)
+    .ok_or_else(|| anyhow::anyhow!("machine '{host}' not found"))?;
+
+  let ip_entry = machine
+    .ip
+    .get(env)
+    .ok_or_else(|| anyhow::anyhow!("no IP defined for {host}/{env}"))?;
+
+  match ip_entry {
+    IpEntry::Static(ip) => Ok(ip.clone()),
+    IpEntry::FromInfra { unit, output, .. } => {
+      read_cached(config, repo_root, env, unit, output, credentials)
+    }
+  }
+}
 
 /// Refresh the infra output cache for one env (all units, or one unit).
 /// Writes .dogma/cache/<env>.json.
@@ -72,13 +124,10 @@ pub fn refresh_with_creds(
     init_unit(
       config,
       repo_root,
-      cli,
       &unit_dir,
       env,
       unit,
-      false,
-      false,
-      false,
+      &InitOptions::default(),
       credentials,
     )?;
 
@@ -92,15 +141,6 @@ pub fn refresh_with_creds(
 
   log_dim!("infra cache written: {}", cache_file.display());
   Ok(())
-}
-
-/// Resolve infra credentials once and return them for reuse across multiple
-/// `read_cached` calls within the same operation.
-pub fn resolve_infra_credentials(
-  config: &DogmaConfig,
-  env: &str,
-) -> Result<Vec<(String, String)>> {
-  resolve_credentials(config, env)
 }
 
 /// Read one output value from the cache, fetching sensitive outputs live.
@@ -169,13 +209,10 @@ fn fetch_sensitive_output(
   init_unit(
     config,
     repo_root,
-    cli,
     &unit_dir,
     env,
     unit,
-    false,
-    false,
-    false,
+    &InitOptions::default(),
     credentials,
   )?;
 

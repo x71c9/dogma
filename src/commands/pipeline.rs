@@ -1,12 +1,12 @@
 use anyhow::{bail, Context, Result};
-use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
 use crate::config::{DogmaConfig, PipelineConfig, PipelineType, VersionScheme};
 use crate::git;
 use crate::infra::output as infra_output;
-use crate::{log_dim, log_info, log_step, log_warn};
+use crate::infra::output::EnvCreds;
+use crate::{log_dim, log_info, log_step};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -17,9 +17,8 @@ pub enum Mode {
 }
 
 pub struct PipelineOptions {
-  pub pipeline_name: String,
-  pub env: Option<String>,
-  pub host: Option<String>,
+  pub env: String,
+  pub pipeline_name: Option<String>,
   pub mode: Mode,
   pub skip_infra: bool,
   pub refetch: bool,
@@ -34,18 +33,44 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   let config = crate::config::normalize::normalize(repo_root)?;
   crate::config::validate::validate(&config)?;
 
-  // When no pipelines are declared in dogma.yml the first positional arg is
-  // the env (not the pipeline name) and a default nixos pipeline is used.
-  let (pipeline, env, opts) = if config.pipeline.is_empty() {
-    let shifted_env = opts.pipeline_name.clone();
-    let shifted_host = opts.env.clone();
-    let opts = PipelineOptions {
-      pipeline_name: "default".to_string(),
-      env: Some(shifted_env.clone()),
-      host: shifted_host.or(opts.host),
-      ..opts
+  // The first positional is normally the env, but a pipeline name with an
+  // `env` attribute may be given alone: `dogma deploy publish --new`.
+  let (env, pipeline_name) =
+    match (opts.env.clone(), opts.pipeline_name.clone()) {
+      (env, Some(name)) => (env, Some(name)),
+      (first, None) => {
+        let is_env = config.env.contains(&first);
+        let matched = config.pipeline.iter().find(|p| p.name == first);
+        match (is_env, matched) {
+          (true, Some(_)) => bail!(
+            "'{first}' is both an env and a pipeline in dogma.yml — run \
+           'dogma deploy <env> {first}'"
+          ),
+          (true, None) => (first, None),
+          (false, Some(p)) => {
+            let env = p.env.clone().ok_or_else(|| {
+              anyhow::anyhow!(
+                "pipeline '{first}' has no env attribute — run \
+               'dogma deploy <env> {first}'"
+              )
+            })?;
+            (env, Some(first))
+          }
+          (false, None) => bail!(
+            "'{first}' is neither an env nor a pipeline declared in dogma.yml"
+          ),
+        }
+      }
     };
-    let default_pipeline = PipelineConfig {
+
+  // When no pipelines are declared in dogma.yml a default nixos pipeline is
+  // used. When exactly one is declared the pipeline name may be omitted;
+  // with several declared it is required.
+  let pipeline = if config.pipeline.is_empty() {
+    if let Some(name) = &pipeline_name {
+      bail!("pipeline '{name}' given but dogma.yml declares no pipelines");
+    }
+    PipelineConfig {
       name: "default".to_string(),
       pipeline_type: PipelineType::Nixos,
       version_prefix: "deploy".to_string(),
@@ -53,38 +78,48 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       version_script: None,
       deployed_prefix: "deployed".to_string(),
       command: None,
-      env: Some(shifted_env.clone()),
+      env: None,
       hooks: config.hooks.clone(),
-    };
-    (default_pipeline, shifted_env, opts)
+    }
   } else {
-    let pipeline = config
-      .pipeline
-      .iter()
-      .find(|p| p.name == opts.pipeline_name)
-      .ok_or_else(|| {
-        anyhow::anyhow!(
-          "pipeline '{}' not found in dogma.yml",
-          opts.pipeline_name
-        )
-      })?
-      .clone();
-
-    let env: String = match opts.env.clone() {
-      Some(e) => e,
-      None => pipeline.env.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-          "pipeline '{}': no env specified and no default env configured",
-          pipeline.name
-        )
-      })?,
+    let available = || {
+      config
+        .pipeline
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
     };
-    (pipeline, env, opts)
+    match &pipeline_name {
+      Some(name) => config
+        .pipeline
+        .iter()
+        .find(|p| p.name == *name)
+        .ok_or_else(|| {
+          anyhow::anyhow!(
+            "pipeline '{}' not found in dogma.yml (available: {})",
+            name,
+            available()
+          )
+        })?
+        .clone(),
+      None if config.pipeline.len() == 1 => config.pipeline[0].clone(),
+      None => bail!(
+        "multiple pipelines declared — run 'dogma deploy {env} <pipeline>' \
+         (available: {})",
+        available()
+      ),
+    }
   };
 
-  if !config.env.contains(&env) {
-    bail!("env '{}' is not declared in dogma.yml", env);
-  }
+  // How to invoke this deploy from the command line, for error hints.
+  let deploy_hint = if config.pipeline.is_empty() {
+    format!("dogma deploy {env}")
+  } else {
+    format!("dogma deploy {env} {}", pipeline.name)
+  };
+
+  config.ensure_env(&env)?;
 
   // -----------------------------------------------------------------------
   // Step 1: dirty tree check
@@ -98,68 +133,21 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   let mut created_deploy_commit = false; // true once dogma owns a commit to amend into
 
   if !dirty.is_empty() {
-    log_warn!("pipeline working tree has uncommitted changes:");
-    eprintln!();
-    for f in &dirty.files {
-      crate::log::status_line(f.status, &f.path);
-    }
-    eprintln!();
+    super::warn_dirty("pipeline", &dirty);
 
     if !matches!(opts.mode, Mode::New) {
       bail!("working tree is dirty — commit or stash your changes before promoting a version");
     }
 
-    let msg = match &opts.commit_msg {
-      Some(m) => {
-        log_info!("pipeline -m flag provided — committing with: {m}");
-        m.clone()
-      }
-      None => {
-        eprint!(
-          "{}commit these changes before deploying? [Y/n] ",
-          crate::log::prompt_prefix()
-        );
-        io::stderr().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
-          bail!("aborted — commit or stash your changes and re-run");
-        }
-        let suggested = git::suggest_commit_msg(&dirty);
-        if let Some(ref s) = suggested {
-          log_info!("pipeline suggested message: {}", crate::log::cyan(s));
-          eprint!(
-            "{}commit message (leave blank to accept): ",
-            crate::log::prompt_prefix()
-          );
-          io::stderr().flush()?;
-          let mut m = String::new();
-          io::stdin().read_line(&mut m)?;
-          let m = m.trim().to_string();
-          if m.is_empty() {
-            s.clone()
-          } else {
-            m
-          }
-        } else {
-          eprint!("{}commit message: ", crate::log::prompt_prefix());
-          io::stderr().flush()?;
-          let mut m = String::new();
-          io::stdin().read_line(&mut m)?;
-          m.trim().to_string()
-        }
-      }
-    };
-
-    let msg = if msg.is_empty() {
-      "chore: pre-deploy snapshot".to_string()
-    } else {
-      msg
-    };
-
-    git::commit_all(&repo, &msg)?;
+    super::commit_dirty(
+      &repo,
+      &dirty,
+      opts.commit_msg.clone(),
+      "pipeline",
+      "deploying",
+      "chore: pre-deploy snapshot",
+    )?;
     created_deploy_commit = true;
-    log_info!("pipeline committed: {msg}");
   }
 
   // -----------------------------------------------------------------------
@@ -186,10 +174,8 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       let tags = git::list_pipeline_tags(&repo, &pipeline.version_prefix)?;
       let tag = tags.into_iter().next().ok_or_else(|| {
         anyhow::anyhow!(
-          "no {}/v* tags found — run 'dogma deploy {} {} --new' first",
-          pipeline.version_prefix,
-          opts.pipeline_name,
-          env
+          "no {}/v* tags found — run '{deploy_hint} --new' first",
+          pipeline.version_prefix
         )
       })?;
       log_info!("pipeline latest: {tag}");
@@ -202,10 +188,8 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
         git::list_pipeline_tags_with_date(&repo, &pipeline.version_prefix)?;
       if tags_with_date.is_empty() {
         bail!(
-          "no {}/v* tags found — run 'dogma deploy {} {} --new' first",
-          pipeline.version_prefix,
-          opts.pipeline_name,
-          env
+          "no {}/v* tags found — run '{deploy_hint} --new' first",
+          pipeline.version_prefix
         );
       }
       let items: Vec<String> = tags_with_date
@@ -225,14 +209,7 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
         })
         .collect();
 
-      let theme = dialoguer::theme::ColorfulTheme {
-        active_item_style: dialoguer::console::Style::new().for_stderr().red(),
-        active_item_prefix: dialoguer::console::style(">".to_string())
-          .for_stderr()
-          .red(),
-        ..dialoguer::theme::ColorfulTheme::default()
-      };
-      let idx = dialoguer::Select::with_theme(&theme)
+      let idx = dialoguer::Select::with_theme(&crate::log::select_theme())
         .with_prompt(format!("select version to deploy to '{}'", env))
         .items(&items)
         .default(0)
@@ -264,19 +241,11 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       repo_root,
       &version,
       &env,
-      &opts.pipeline_name,
+      &pipeline.name,
     )?;
 
-    let hook_dirty = git::dirty_files(&repo, false)?;
-    if !hook_dirty.is_empty() {
-      if created_deploy_commit {
-        git::amend_all(&repo)?;
-        log_info!("pipeline folded hook changes into deploy commit");
-      } else {
-        git::commit_all(&repo, &format!("chore: release {version}"))?;
-        log_info!("pipeline committed: chore: release {version}");
-      }
-    } else {
+    if !absorb_changes(&repo, created_deploy_commit, &version, "hook changes")?
+    {
       log_dim!("pipeline hooks made no tracked changes");
     }
   } else {
@@ -293,11 +262,10 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
     repo_root,
     env: &env,
     version: &version,
-    pipeline_name: &opts.pipeline_name,
+    pipeline_name: &pipeline.name,
     is_new,
     skip_infra: opts.skip_infra,
     refetch: opts.refetch,
-    host_filter: opts.host.as_deref(),
   };
 
   let deployed_targets = match &pipeline.pipeline_type {
@@ -305,22 +273,19 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       // Write infra cache + encrypt secrets first (no SSH yet), then commit
       // before touching any host — a failed nixos-rebuild should never leave
       // encrypted secrets dirty on disk with no git record of them.
-      prepare_nixos_deploy(&ctx)?;
+      let all_env_creds = infra_output::resolve_all_env_creds(&config)?;
+      prepare_nixos_deploy(&ctx, &all_env_creds)?;
 
       if is_new {
-        let prepare_dirty = git::dirty_files(&repo, false)?;
-        if !prepare_dirty.is_empty() {
-          if created_deploy_commit {
-            git::amend_all(&repo)?;
-            log_info!("pipeline folded deploy changes into deploy commit");
-          } else {
-            git::commit_all(&repo, &format!("chore: release {version}"))?;
-            log_info!("pipeline committed: chore: release {version}");
-          }
-        }
+        absorb_changes(
+          &repo,
+          created_deploy_commit,
+          &version,
+          "deploy changes",
+        )?;
       }
 
-      deploy_nixos_hosts(&ctx)?
+      deploy_nixos_hosts(&ctx, &all_env_creds)?
     }
     PipelineType::Custom => {
       run_custom_command(
@@ -334,16 +299,12 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
       // Custom commands are a single opaque step — commit whatever they
       // produced after the fact, same as before.
       if is_new {
-        let deploy_dirty = git::dirty_files(&repo, false)?;
-        if !deploy_dirty.is_empty() {
-          if created_deploy_commit {
-            git::amend_all(&repo)?;
-            log_info!("pipeline folded deploy changes into deploy commit");
-          } else {
-            git::commit_all(&repo, &format!("chore: release {version}"))?;
-            log_info!("pipeline committed: chore: release {version}");
-          }
-        }
+        absorb_changes(
+          &repo,
+          created_deploy_commit,
+          &version,
+          "deploy changes",
+        )?;
       }
 
       vec![]
@@ -366,7 +327,7 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
     repo_root,
     &version,
     &env,
-    &opts.pipeline_name,
+    &pipeline.name,
   )?;
 
   // Drop explicitly so branch restoration (and its log line) happens before
@@ -382,6 +343,29 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   Ok(())
 }
 
+/// Commit tracked changes made mid-pipeline (hooks, secret generation),
+/// folding them into the deploy commit when dogma already owns one. Returns
+/// true when anything was committed.
+fn absorb_changes(
+  repo: &git2::Repository,
+  created_deploy_commit: bool,
+  version: &str,
+  what: &str,
+) -> Result<bool> {
+  let dirty = git::dirty_files(repo, false)?;
+  if dirty.is_empty() {
+    return Ok(false);
+  }
+  if created_deploy_commit {
+    git::amend_all(repo)?;
+    log_info!("pipeline folded {what} into deploy commit");
+  } else {
+    git::commit_all(repo, &format!("chore: release {version}"))?;
+    log_info!("pipeline committed: chore: release {version}");
+  }
+  Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // Version resolution
 // ---------------------------------------------------------------------------
@@ -393,9 +377,7 @@ fn resolve_new_version(
 ) -> Result<String> {
   match &pipeline.version_scheme {
     VersionScheme::Calver => git::next_calver(repo, &pipeline.version_prefix),
-    VersionScheme::Semver => {
-      git::next_semver(repo, &pipeline.version_prefix, repo_root)
-    }
+    VersionScheme::Semver => git::next_semver(repo, &pipeline.version_prefix),
     VersionScheme::Custom => {
       let script = pipeline.version_script.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -421,7 +403,6 @@ struct DeployCtx<'a> {
   is_new: bool,
   skip_infra: bool,
   refetch: bool,
-  host_filter: Option<&'a str>,
 }
 
 fn run_custom_command(
@@ -470,8 +451,11 @@ fn run_custom_command(
 /// Refreshes infra cache and (on `--new`) generates + encrypts secrets.
 /// Writes files to disk but never touches a host over SSH, so the pipeline
 /// can commit the result before anything is actually deployed.
-fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
-  use super::deploy;
+fn prepare_nixos_deploy(
+  ctx: &DeployCtx<'_>,
+  all_env_creds: &[EnvCreds],
+) -> Result<()> {
+  use super::nixos;
 
   let config = ctx.config;
   let repo_root = ctx.repo_root;
@@ -480,24 +464,9 @@ fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
   let skip_infra = ctx.skip_infra;
   let refetch = ctx.refetch;
 
-  deploy::check_all_deps()?;
-
-  if let Some(h) = ctx.host_filter {
-    if !config.machines.contains_key(h) {
-      bail!("host '{h}' is not declared in dogma.yml");
-    }
-  }
+  nixos::check_all_deps()?;
 
   let all_envs: Vec<String> = config.env.clone();
-
-  let all_env_creds: Vec<(String, Vec<(String, String)>)> = {
-    let mut v = Vec::new();
-    for e in &all_envs {
-      let creds = infra_output::resolve_infra_credentials(config, e)?;
-      v.push((e.clone(), creds));
-    }
-    v
-  };
 
   // Infra cache
   let cache_path = |e: &str| repo_root.join(format!(".dogma/cache/{e}.json"));
@@ -524,7 +493,7 @@ fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
       all_envs
         .iter()
         .map(String::as_str)
-        .filter(|e| *e == env || !deploy::cache_is_usable(&cache_path(e)))
+        .filter(|e| *e == env || !nixos::cache_is_usable(&cache_path(e)))
         .collect()
     }
   } else {
@@ -535,8 +504,8 @@ fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
   };
 
   for e in envs_to_refresh {
-    if deploy::config_needs_infra(config, e) {
-      let creds = deploy::lookup_creds(&all_env_creds, e);
+    if nixos::config_needs_infra(config, e) {
+      let creds = infra_output::lookup_creds(all_env_creds, e);
       infra_output::refresh_with_creds(config, repo_root, e, None, creds)?;
     } else {
       log_dim!("pipeline no from:infra refs for {e} — skipping");
@@ -545,19 +514,13 @@ fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
 
   // Sops + secrets (--new only)
   if is_new {
-    crate::sops::generate::run(
-      config,
-      repo_root,
-      env,
-      refetch,
-      Some(all_env_creds.as_slice()),
-    )?;
+    crate::sops::generate::run(config, repo_root, all_env_creds)?;
     for e in &all_envs {
       crate::sops::secrets::generate(config, repo_root, e)?;
     }
-    deploy::encrypt_secrets(config, repo_root, &all_envs, env, &all_env_creds)?;
+    nixos::encrypt_secrets(config, repo_root, &all_envs, all_env_creds)?;
   } else {
-    deploy::verify_secrets_committed(config, repo_root, env)?;
+    nixos::verify_secrets_committed(config, repo_root, env)?;
   }
 
   Ok(())
@@ -566,34 +529,21 @@ fn prepare_nixos_deploy(ctx: &DeployCtx<'_>) -> Result<()> {
 /// SSHes into each target host and runs the actual deploy. Must only be
 /// called after any secrets/config changes from `prepare_nixos_deploy` have
 /// been committed.
-fn deploy_nixos_hosts(ctx: &DeployCtx<'_>) -> Result<Vec<String>> {
-  use super::deploy;
+fn deploy_nixos_hosts(
+  ctx: &DeployCtx<'_>,
+  all_env_creds: &[EnvCreds],
+) -> Result<Vec<String>> {
+  use super::nixos;
 
   let config = ctx.config;
-  let repo_root = ctx.repo_root;
   let env = ctx.env;
 
-  let host_list: Vec<String> = match ctx.host_filter {
-    Some(h) => vec![h.to_string()],
-    None => config.machines.keys().cloned().collect(),
-  };
-
-  let all_envs: Vec<String> = config.env.clone();
-  let all_env_creds: Vec<(String, Vec<(String, String)>)> = {
-    let mut v = Vec::new();
-    for e in &all_envs {
-      let creds = infra_output::resolve_infra_credentials(config, e)?;
-      v.push((e.clone(), creds));
-    }
-    v
-  };
-
-  let infra_creds = deploy::lookup_creds(&all_env_creds, env);
+  let infra_creds = infra_output::lookup_creds(all_env_creds, env);
   let mut deployed_targets: Vec<String> = Vec::new();
-  for host in &host_list {
+  for host in config.machines.keys() {
     log_step!("pipeline host {host}");
     let target =
-      deploy::deploy_host(config, repo_root, host, env, infra_creds)?;
+      nixos::deploy_host(config, ctx.repo_root, host, env, infra_creds)?;
     deployed_targets.push(target);
   }
 

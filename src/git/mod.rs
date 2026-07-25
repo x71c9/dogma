@@ -16,16 +16,6 @@ pub struct DirtyFile {
   pub path: String,
 }
 
-pub struct DirtyFiles {
-  pub files: Vec<DirtyFile>,
-}
-
-impl DirtyFiles {
-  pub fn is_empty(&self) -> bool {
-    self.files.is_empty()
-  }
-}
-
 /// Maps a git2 status to a single porcelain-style letter. Index (staged) state
 /// takes precedence over worktree state, matching `git status` column ordering.
 fn status_char(s: git2::Status) -> char {
@@ -52,7 +42,7 @@ fn status_char(s: git2::Status) -> char {
 pub fn dirty_files(
   repo: &Repository,
   include_untracked: bool,
-) -> Result<DirtyFiles> {
+) -> Result<Vec<DirtyFile>> {
   let mut opts = git2::StatusOptions::new();
   opts
     .include_untracked(include_untracked)
@@ -71,7 +61,7 @@ pub fn dirty_files(
     })
     .collect();
 
-  Ok(DirtyFiles { files })
+  Ok(files)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,11 +129,7 @@ pub fn next_calver(repo: &Repository, version_prefix: &str) -> Result<String> {
 /// Scans existing tags matching `<prefix>/v*.*.*` to find the current latest
 /// base, then prompts the user for patch/minor/major bump.
 /// Returns `<prefix>/vX.Y.Z`.
-pub fn next_semver(
-  repo: &Repository,
-  version_prefix: &str,
-  repo_root: &std::path::Path,
-) -> Result<String> {
+pub fn next_semver(repo: &Repository, version_prefix: &str) -> Result<String> {
   let pattern = format!("{version_prefix}/v*");
   let mut versions: Vec<(u32, u32, u32)> = repo
     .tag_names(Some(&pattern))?
@@ -177,15 +163,7 @@ pub fn next_semver(
     format!("major  → {major_v}"),
   ];
 
-  let theme = dialoguer::theme::ColorfulTheme {
-    active_item_style: dialoguer::console::Style::new().for_stderr().red(),
-    active_item_prefix: dialoguer::console::style(">".to_string())
-      .for_stderr()
-      .red(),
-    ..dialoguer::theme::ColorfulTheme::default()
-  };
-
-  let idx = dialoguer::Select::with_theme(&theme)
+  let idx = dialoguer::Select::with_theme(&crate::log::select_theme())
     .with_prompt(format!("select version bump for '{version_prefix}'"))
     .items(&items)
     .default(0)
@@ -197,7 +175,6 @@ pub fn next_semver(
     _ => major_v,
   };
 
-  let _ = repo_root; // available for future use
   Ok(format!("{version_prefix}/{version_str}"))
 }
 
@@ -251,8 +228,28 @@ pub fn list_pipeline_tags(
     .map(str::to_string)
     .collect();
 
-  tags.sort_by(|a, b| b.cmp(a));
+  tags
+    .sort_by(|a, b| version_key(b).cmp(&version_key(a)).then_with(|| b.cmp(a)));
   Ok(tags)
+}
+
+/// Sort key for version tags: the tag's numeric runs (e.g.
+/// "deploy/v26.06.0004" → [26, 6, 4]), so "v10.0.0" orders after "v9.0.0"
+/// where a plain string sort would not.
+fn version_key(tag: &str) -> Vec<u64> {
+  let mut key = Vec::new();
+  let mut cur: Option<u64> = None;
+  for c in tag.chars() {
+    if let Some(d) = c.to_digit(10) {
+      cur = Some(cur.unwrap_or(0).saturating_mul(10).saturating_add(d as u64));
+    } else if let Some(n) = cur.take() {
+      key.push(n);
+    }
+  }
+  if let Some(n) = cur {
+    key.push(n);
+  }
+  key
 }
 
 /// Returns pipeline tags sorted newest-first, each paired with a human-readable
@@ -468,17 +465,14 @@ fn push_refspec(repo: &Repository, refspec: &str) -> Result<()> {
 // Suggest commit message (heuristic, mirrors suggest-commit-msg.sh)
 // ---------------------------------------------------------------------------
 
-pub fn suggest_commit_msg(dirty: &DirtyFiles) -> Option<String> {
-  let files: Vec<String> = dirty.files.iter().map(|f| f.path.clone()).collect();
+pub fn suggest_commit_msg(dirty: &[DirtyFile]) -> Option<String> {
+  let files: Vec<String> = dirty.iter().map(|f| f.path.clone()).collect();
 
   if files.is_empty() {
     return None;
   }
 
-  let all_new = dirty
-    .files
-    .iter()
-    .all(|f| f.status == 'A' || f.status == '?');
+  let all_new = dirty.iter().all(|f| f.status == 'A' || f.status == '?');
   let commit_type = if all_new { "feat" } else { infer_type(&files) };
   let scope = infer_scope(&files);
   let desc = files

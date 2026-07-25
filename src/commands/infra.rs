@@ -10,11 +10,50 @@ use crate::error::check_dep;
 use crate::vault;
 use crate::{git, log_dim, log_info, log_step, log_warn};
 
+/// Flags controlling how `<cli> init` is run for a unit.
+#[derive(Default)]
+pub struct InitOptions {
+  /// Pass -migrate-state instead of -reconfigure.
+  pub migrate_state: bool,
+  /// Pass -upgrade (updates the provider lock file).
+  pub upgrade: bool,
+  /// Bypass the already-initialized heuristic and always re-run init.
+  pub force: bool,
+}
+
 struct InfraFlags {
   migrate_state: bool,
   upgrade: bool,
   subcommand: &'static str,
   commit_msg: Option<String>,
+}
+
+/// Shared preamble for unit-scoped infra commands: env is declared, the infra
+/// block exists, its cli is on PATH, and the unit directory exists. Returns
+/// the unit directory.
+fn check_unit(
+  config: &DogmaConfig,
+  repo_root: &Path,
+  env: &str,
+  unit: &str,
+) -> Result<PathBuf> {
+  config.ensure_env(env)?;
+
+  let infra = config
+    .infra
+    .as_ref()
+    .ok_or_else(|| anyhow::anyhow!("no 'infra' block in dogma.yml"))?;
+
+  let cli = &infra.cli;
+  check_dep(cli, &format!("install {cli} and make sure it is on PATH"))?;
+
+  let unit_dir = repo_root
+    .join(infra.path.trim_start_matches("./"))
+    .join(unit);
+  if !unit_dir.is_dir() {
+    bail!("unit '{unit}' not found: {}", unit_dir.display());
+  }
+  Ok(unit_dir)
 }
 
 pub fn apply(
@@ -54,38 +93,21 @@ pub fn init(
   let config = normalize(repo_root)?;
   validate(&config)?;
 
-  if !config.env.contains(&env.to_string()) {
-    bail!("env '{env}' is not declared in dogma.yml");
-  }
-
-  let infra = config
-    .infra
-    .as_ref()
-    .ok_or_else(|| anyhow::anyhow!("no 'infra' block in dogma.yml"))?;
-
-  let cli = &infra.cli;
-  check_dep(cli, &format!("install {cli} and make sure it is on PATH"))?;
-
-  let unit_dir = repo_root
-    .join(infra.path.trim_start_matches("./"))
-    .join(unit);
-  if !unit_dir.is_dir() {
-    bail!("unit '{unit}' not found: {}", unit_dir.display());
-  }
-
+  let unit_dir = check_unit(&config, repo_root, env, unit)?;
   let credentials = resolve_credentials(&config, env)?;
 
   log_step!("infra init {unit}");
   init_unit(
     &config,
     repo_root,
-    cli,
     &unit_dir,
     env,
     unit,
-    migrate_state,
-    upgrade,
-    true,
+    &InitOptions {
+      migrate_state,
+      upgrade,
+      force: true,
+    },
     &credentials,
   )
 }
@@ -126,23 +148,8 @@ fn run_infra(
     subcommand,
     commit_msg,
   } = flags;
-  if !config.env.contains(&env.to_string()) {
-    bail!("env '{env}' is not declared in dogma.yml");
-  }
 
-  let infra = config
-    .infra
-    .as_ref()
-    .ok_or_else(|| anyhow::anyhow!("no 'infra' block in dogma.yml"))?;
-
-  let cli = &infra.cli;
-  check_dep(cli, &format!("install {cli} and make sure it is on PATH"))?;
-
-  let infra_dir = repo_root.join(infra.path.trim_start_matches("./"));
-  let unit_dir = infra_dir.join(unit);
-  if !unit_dir.is_dir() {
-    bail!("unit '{unit}' not found: {}", unit_dir.display());
-  }
+  let unit_dir = check_unit(config, repo_root, env, unit)?;
 
   // 'apply' records HEAD as the applied state (tag infra-applied/<env>/<unit>).
   // The working tree must match HEAD before we run — offer to commit dirty
@@ -158,30 +165,22 @@ fn run_infra(
   let credentials = resolve_credentials(config, env)?;
 
   log_step!("infra init {unit}");
-  run_init(
+  init_unit(
     config,
     repo_root,
-    InitArgs {
-      cli,
-      unit_dir: &unit_dir,
-      env,
-      unit,
+    &unit_dir,
+    env,
+    unit,
+    &InitOptions {
       migrate_state,
       upgrade,
-      credentials: &credentials,
+      force: false,
     },
+    &credentials,
   )?;
 
   log_step!("infra {subcommand} {unit}");
-  run_subcommand(
-    config,
-    repo_root,
-    cli,
-    &unit_dir,
-    env,
-    subcommand,
-    &credentials,
-  )?;
+  run_subcommand(config, repo_root, &unit_dir, env, subcommand, &credentials)?;
 
   // Cache this unit's outputs now that apply succeeded: they exist in remote
   // state, so `dogma output`/`env`/`deploy` can read them without a separate
@@ -223,63 +222,15 @@ fn maybe_commit_dirty(
     return Ok(());
   }
 
-  log_warn!("infra working tree has uncommitted changes:");
-  eprintln!();
-  for f in &dirty.files {
-    crate::log::status_line(f.status, &f.path);
-  }
-  eprintln!();
-
-  let msg = match commit_msg {
-    Some(m) => {
-      log_info!("infra -m flag provided — committing with: {m}");
-      m
-    }
-    None => {
-      eprint!(
-        "{}commit these changes before applying? [Y/n] ",
-        crate::log::prompt_prefix()
-      );
-      io::stderr().flush()?;
-      let mut answer = String::new();
-      io::stdin().read_line(&mut answer)?;
-      if matches!(answer.trim().to_lowercase().as_str(), "n" | "no") {
-        bail!("aborted — commit or stash your changes and re-run");
-      }
-      let suggested = git::suggest_commit_msg(&dirty);
-      let prompt_msg = if let Some(ref s) = suggested {
-        log_info!("infra suggested message: {}", crate::log::cyan(s));
-        eprint!(
-          "{}commit message (leave blank to accept): ",
-          crate::log::prompt_prefix()
-        );
-        io::stderr().flush()?;
-        let mut m = String::new();
-        io::stdin().read_line(&mut m)?;
-        let m = m.trim().to_string();
-        if m.is_empty() {
-          s.clone()
-        } else {
-          m
-        }
-      } else {
-        eprint!("{}commit message: ", crate::log::prompt_prefix());
-        io::stderr().flush()?;
-        let mut m = String::new();
-        io::stdin().read_line(&mut m)?;
-        m.trim().to_string()
-      };
-      if prompt_msg.is_empty() {
-        "chore: pre-infra snapshot".to_string()
-      } else {
-        prompt_msg
-      }
-    }
-  };
-
-  git::commit_all(repo, &msg)?;
-  log_info!("infra committed: {msg}");
-  Ok(())
+  super::warn_dirty("infra", &dirty);
+  super::commit_dirty(
+    repo,
+    &dirty,
+    commit_msg,
+    "infra",
+    "applying",
+    "chore: pre-infra snapshot",
+  )
 }
 
 /// Force-update a moving tag `infra-applied/<env>/<unit>` to point at the
@@ -321,16 +272,6 @@ pub fn resolve_credentials(
   Ok(creds)
 }
 
-struct InitArgs<'a> {
-  cli: &'a str,
-  unit_dir: &'a Path,
-  env: &'a str,
-  unit: &'a str,
-  migrate_state: bool,
-  upgrade: bool,
-  credentials: &'a [(String, String)],
-}
-
 /// Expand a path template relative to the infra directory.
 /// The only supported placeholder is `{env}`.
 fn resolve_template(
@@ -343,43 +284,21 @@ fn resolve_template(
   repo_root.join(infra_path).join(rel)
 }
 
-fn run_init(
-  config: &DogmaConfig,
-  repo_root: &Path,
-  args: InitArgs<'_>,
-) -> Result<()> {
-  init_unit(
-    config,
-    repo_root,
-    args.cli,
-    args.unit_dir,
-    args.env,
-    args.unit,
-    args.migrate_state,
-    args.upgrade,
-    false,
-    args.credentials,
-  )
-}
-
 /// Run `<cli> init` for a single unit, pointing it at the backend bucket for
 /// `env` (via the env's backend.conf) and the per-unit state key. `-reconfigure`
 /// is used so the unit's `.terraform/` is re-pointed to the correct env backend
 /// even if it was previously initialized for a different env.
-#[allow(clippy::too_many_arguments)]
 pub fn init_unit(
   config: &DogmaConfig,
   repo_root: &Path,
-  cli: &str,
   unit_dir: &Path,
   env: &str,
   unit: &str,
-  migrate_state: bool,
-  upgrade: bool,
-  force: bool,
+  opts: &InitOptions,
   credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
+  let cli = &infra.cli;
   let infra_path = infra.path.trim_start_matches("./");
   let backend_conf =
     resolve_template(repo_root, infra_path, &infra.backend_config, env);
@@ -399,9 +318,9 @@ pub fn init_unit(
   // present in the local plugin cache. `-migrate-state` and `-upgrade` always
   // re-run so lock file or state moves are never silently skipped; `force`
   // (dogma infra init) bypasses the heuristic entirely.
-  if !force
-    && !migrate_state
-    && !upgrade
+  if !opts.force
+    && !opts.migrate_state
+    && !opts.upgrade
     && backend_already_correct(unit_dir, &backend_conf, &state_key_value)
     && providers_cached(unit_dir)
   {
@@ -409,9 +328,9 @@ pub fn init_unit(
     return Ok(());
   }
 
-  let reconfigure_flag = if migrate_state {
+  let reconfigure_flag = if opts.migrate_state {
     "-migrate-state"
-  } else if upgrade {
+  } else if opts.upgrade {
     "-upgrade"
   } else {
     "-reconfigure"
@@ -425,7 +344,7 @@ pub fn init_unit(
   ];
   // -input=false keeps a captured run from silently blocking on a prompt
   // nobody can see; -migrate-state must stay interactive (see below).
-  if !migrate_state {
+  if !opts.migrate_state {
     args.push("-input=false".to_string());
   }
 
@@ -441,7 +360,7 @@ pub fn init_unit(
   // must stream through untouched. Every other init runs captured: tofu's
   // chatter is replaced by the dogma lines around it, and the full output is
   // printed only when init fails.
-  if migrate_state {
+  if opts.migrate_state {
     let status = cmd
       .status()
       .with_context(|| format!("failed to run '{cli} init'"))?;
@@ -569,13 +488,13 @@ fn backend_conf_bucket(backend_conf: &Path) -> Option<String> {
 fn run_subcommand(
   config: &DogmaConfig,
   repo_root: &Path,
-  cli: &str,
   unit_dir: &Path,
   env: &str,
   subcommand: &str,
   credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
+  let cli = &infra.cli;
   let infra_path = infra.path.trim_start_matches("./");
   let tfvars = resolve_template(repo_root, infra_path, &infra.var_file, env);
 

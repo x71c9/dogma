@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 // Top-level config (dogma.yml raw form)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DogmaConfig {
   pub name: String,
   pub env: Vec<String>,
@@ -40,6 +40,16 @@ pub struct DogmaConfig {
   /// pipeline defines its own hooks.
   #[serde(default)]
   pub hooks: PipelineHooks,
+}
+
+impl DogmaConfig {
+  /// Errors unless `env` is one of the declared environments.
+  pub fn ensure_env(&self, env: &str) -> anyhow::Result<()> {
+    if !self.env.iter().any(|e| e == env) {
+      anyhow::bail!("env '{env}' is not declared in dogma.yml");
+    }
+    Ok(())
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +131,6 @@ pub enum HostnameField {
 }
 
 impl HostnameField {
-  #[allow(dead_code)]
   pub fn get(&self, env: &str, machine_name: &str) -> String {
     match self {
       HostnameField::Flat(s) => s.replace("{env}", env),
@@ -143,7 +152,6 @@ pub enum IpField {
 }
 
 impl IpField {
-  #[allow(dead_code)]
   pub fn get(&self, env: &str) -> Option<&IpEntry> {
     match self {
       IpField::Shorthand(e) => Some(e),
@@ -180,16 +188,6 @@ pub enum SecretLeaf {
     unit: String,
     output: String,
   },
-}
-
-impl SecretLeaf {
-  #[allow(dead_code)]
-  pub fn source(&self) -> &str {
-    match self {
-      SecretLeaf::FromVault { from, .. } => from,
-      SecretLeaf::FromInfra { from, .. } => from,
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +326,8 @@ pub struct PipelineConfig {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub command: Option<String>,
 
-  /// Default environment used when <env> is omitted on the command line.
+  /// Optional fixed environment. Lets the pipeline be run by name alone:
+  /// `dogma deploy <pipeline>`.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub env: Option<String>,
 

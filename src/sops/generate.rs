@@ -9,29 +9,17 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{AdminKey, DogmaConfig, IpEntry, IpField};
-use crate::error::check_dep;
-use crate::infra::output::{read_cached, resolve_infra_credentials};
+use crate::config::{AdminKey, DogmaConfig};
+use crate::infra::output::{lookup_creds, resolve_machine_ip, EnvCreds};
 use crate::{log_dim, log_info, log_warn};
 
-type EnvCreds = (String, Vec<(String, String)>);
-
-/// `env_creds` — if supplied, pre-resolved credentials per env (avoids
-/// redundant vault reads when the caller has already resolved them for
-/// the same envs). Pass `None` to resolve internally.
+/// `env_creds` — pre-resolved infra credentials per env (see
+/// `infra::output::resolve_all_env_creds`).
 pub fn run(
   config: &DogmaConfig,
   repo_root: &Path,
-  _env: &str,
-  _refetch: bool,
-  env_creds: Option<&[EnvCreds]>,
+  env_creds: &[EnvCreds],
 ) -> Result<()> {
-  check_dep("ssh-keyscan", "install openssh")?;
-  check_dep(
-    "ssh-to-age",
-    "install ssh-to-age from https://github.com/Mic92/ssh-to-age",
-  )?;
-
   let nix_secrets = config.nix.secrets.trim_start_matches("./");
   let sops_file = repo_root.join(config.nix.sops.trim_start_matches("./"));
   let sops_dir = sops_file.parent().unwrap_or(repo_root);
@@ -47,31 +35,25 @@ pub fn run(
   let mut rules = String::from("creation_rules:");
 
   for env_name in &all_envs {
-    let owned_creds;
-    let infra_creds: &[(String, String)] = match env_creds {
-      Some(map) => map
-        .iter()
-        .find(|(e, _)| e == env_name)
-        .map(|(_, c)| c.as_slice())
-        .unwrap_or(&[]),
-      None => {
-        owned_creds = resolve_infra_credentials(config, env_name)?;
-        &owned_creds
-      }
-    };
+    let infra_creds = lookup_creds(env_creds, env_name);
     for (host_name, machine) in &config.machines {
       let hostname = machine.hostname.get(env_name, host_name);
 
-      let ip =
-        match resolve_ip(config, repo_root, host_name, env_name, infra_creds) {
-          Ok(ip) => ip,
-          Err(e) => {
-            log_warn!(
-              "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
-            );
-            continue;
-          }
-        };
+      let ip = match resolve_machine_ip(
+        config,
+        repo_root,
+        host_name,
+        env_name,
+        infra_creds,
+      ) {
+        Ok(ip) => ip,
+        Err(e) => {
+          log_warn!(
+            "sops {host_name}/{env_name}: cannot resolve IP — skipping ({e})"
+          );
+          continue;
+        }
+      };
 
       let host_age = fetch_age_key(&ip, &hostname).with_context(|| {
         format!("sops {host_name}/{env_name}: failed to fetch age key")
@@ -118,10 +100,6 @@ fn collect_admin_keys(
       AdminKey::Age { age: a } => age.push(a.clone()),
       AdminKey::Ssh { ssh } => {
         let path = shellexpand::tilde(ssh).to_string();
-        check_dep(
-          "ssh-to-age",
-          "install ssh-to-age from https://github.com/Mic92/ssh-to-age",
-        )?;
         let out = Command::new("ssh-to-age")
           .stdin(
             std::fs::File::open(&path)
@@ -142,33 +120,6 @@ fn collect_admin_keys(
   }
 
   Ok((pgp, age))
-}
-
-fn resolve_ip(
-  config: &DogmaConfig,
-  repo_root: &Path,
-  host_name: &str,
-  env: &str,
-  infra_creds: &[(String, String)],
-) -> Result<String> {
-  let machine = config
-    .machines
-    .get(host_name)
-    .ok_or_else(|| anyhow::anyhow!("machine '{host_name}' not found"))?;
-
-  let ip_entry = match &machine.ip {
-    IpField::PerEnv(m) => m
-      .get(env)
-      .ok_or_else(|| anyhow::anyhow!("no IP defined for {host_name}/{env}"))?,
-    IpField::Shorthand(e) => e,
-  };
-
-  match ip_entry {
-    IpEntry::Static(ip) => Ok(ip.clone()),
-    IpEntry::FromInfra { unit, output, .. } => {
-      read_cached(config, repo_root, env, unit, output, infra_creds)
-    }
-  }
 }
 
 fn fetch_age_key(ip: &str, hostname: &str) -> Result<String> {

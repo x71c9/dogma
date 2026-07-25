@@ -11,7 +11,7 @@ pub fn run(
 
   if !cache_file.exists() {
     bail!(
-      "no cache for env '{env}': {} (run: dogma deploy --skip-sops {env})",
+      "no cache for env '{env}': {} — run 'dogma deploy {env} --new' or 'dogma infra apply {env} <unit>' first",
       cache_file.display()
     );
   }

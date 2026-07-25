@@ -1,39 +1,20 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::config::normalize::normalize;
-use crate::config::{CredentialValue, DogmaConfig};
-use crate::vault;
+use crate::config::DogmaConfig;
 
 pub fn run(repo_root: &std::path::Path, env: &str) -> Result<()> {
   let config = normalize(repo_root)?;
   print_credentials(&config, env)
 }
 
+/// Resolve `infra.credentials` for `env`, validating the env first.
 pub fn collect_credentials(
   config: &DogmaConfig,
   env: &str,
 ) -> Result<Vec<(String, String)>> {
-  if !config.env.contains(&env.to_string()) {
-    bail!("env '{env}' is not declared in dogma.yml");
-  }
-
-  let infra = match &config.infra {
-    Some(i) => i,
-    None => return Ok(vec![]),
-  };
-
-  let mut vars = Vec::new();
-  for (var_name, cred) in &infra.credentials {
-    let value = match cred {
-      CredentialValue::Static(s) => s.clone(),
-      CredentialValue::FromVault { vault_ref, .. } => {
-        vault::read(config, env, vault_ref)?
-      }
-    };
-    vars.push((var_name.clone(), value));
-  }
-
-  Ok(vars)
+  config.ensure_env(env)?;
+  super::infra::resolve_credentials(config, env)
 }
 
 pub fn print_credentials(config: &DogmaConfig, env: &str) -> Result<()> {

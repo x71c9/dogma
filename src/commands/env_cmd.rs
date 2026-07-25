@@ -1,10 +1,11 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::path::Path;
 
 use crate::commands::credentials::shell_escape;
+use crate::commands::infra::resolve_credentials;
 use crate::config::normalize::normalize;
 use crate::config::{DogmaConfig, SecretLeaf};
-use crate::infra::output::{read_cached, resolve_infra_credentials};
+use crate::infra::output::read_cached;
 use crate::vault;
 
 pub fn run(repo_root: &Path, env: &str) -> Result<()> {
@@ -18,11 +19,9 @@ pub fn collect_env(
   env: &str,
   repo_root: &Path,
 ) -> Result<Vec<(String, String)>> {
-  if !config.env.contains(&env.to_string()) {
-    bail!("env '{env}' is not declared in dogma.yml");
-  }
+  config.ensure_env(env)?;
 
-  let infra_creds = resolve_infra_credentials(config, env)?;
+  let infra_creds = resolve_credentials(config, env)?;
   let mut vars = Vec::new();
 
   for (group, fields) in &config.secrets {

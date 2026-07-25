@@ -8,6 +8,7 @@ use crate::config::{
 use crate::error::check_dep;
 use crate::git;
 use crate::infra::output as infra_output;
+use crate::infra::output::{lookup_creds, EnvCreds};
 use crate::vault;
 use crate::{log_dim, log_info};
 
@@ -73,11 +74,8 @@ pub fn encrypt_secrets(
   config: &DogmaConfig,
   repo_root: &Path,
   all_envs: &[String],
-  _active_env: &str,
-  env_creds: &[(String, Vec<(String, String)>)],
+  env_creds: &[EnvCreds],
 ) -> Result<()> {
-  check_dep("sops", "install sops from https://github.com/getsops/sops")?;
-
   let nix_secrets = config.nix.secrets.trim_start_matches("./");
   let nix_path = config.nix.path.trim_start_matches("./");
   let sops_config = repo_root.join(format!("{nix_path}/.sops.yaml"));
@@ -176,7 +174,7 @@ pub fn verify_secrets_committed(
         );
       }
       let rel_str = rel.to_string_lossy();
-      if dirty.files.iter().any(|f| f.path == rel_str) {
+      if dirty.iter().any(|f| f.path == rel_str) {
         bail!(
           "secret has uncommitted changes for {env}: {}\nThe working tree no longer matches what's committed — commit or discard the change, or re-run: dogma deploy {env} --new",
           secret_file.display()
@@ -195,26 +193,18 @@ pub fn deploy_host(
   env: &str,
   infra_creds: &[(String, String)],
 ) -> Result<String> {
-  let machine = config.machines.get(host).unwrap();
+  let machine = config
+    .machines
+    .get(host)
+    .ok_or_else(|| anyhow::anyhow!("machine '{host}' not found"))?;
 
-  let ip_entry = match &machine.ip {
-    IpField::PerEnv(m) => m
-      .get(env)
-      .ok_or_else(|| anyhow::anyhow!("no IP defined for {host}/{env}"))?,
-    IpField::Shorthand(e) => e,
-  };
-
-  let host_ip = match ip_entry {
-    IpEntry::Static(ip) => ip.clone(),
-    IpEntry::FromInfra { unit, output, .. } => infra_output::read_cached(
-      config,
-      repo_root,
-      env,
-      unit,
-      output,
-      infra_creds,
-    )?,
-  };
+  let host_ip = infra_output::resolve_machine_ip(
+    config,
+    repo_root,
+    host,
+    env,
+    infra_creds,
+  )?;
 
   log_info!("deploy {host}/{env} → {host_ip}");
 
@@ -238,11 +228,6 @@ pub fn deploy_host(
 
   match &config.deploy.strategy {
     DeployStrategy::NixosRebuild => {
-      check_dep(
-        "nixos-rebuild",
-        "install nixos-rebuild (available on NixOS or via nixpkgs)",
-      )?;
-
       log_info!(
         "deploy nixos-rebuild switch --flake {}#{hostname} --target-host {host_user}@{host_ip} {sudo_flag}",
         flake_path.display()
@@ -271,15 +256,4 @@ pub fn deploy_host(
 
   log_info!("deploy done: {env}/{host}");
   Ok(format!("{host_user}@{host_ip}"))
-}
-
-pub fn lookup_creds<'a>(
-  env_creds: &'a [(String, Vec<(String, String)>)],
-  env: &str,
-) -> &'a [(String, String)] {
-  env_creds
-    .iter()
-    .find(|(e, _)| e == env)
-    .map(|(_, c)| c.as_slice())
-    .unwrap_or(&[])
 }
