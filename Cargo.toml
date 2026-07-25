@@ -1,6 +1,6 @@
 [package]
 name = "dogma-rust"
-version = "2.2.0"
+version = "3.0.0"
 authors = ["x71c9 <mail@x71c9.com>"]
 edition = "2021"
 description = "Opinionated CLI that bridges secrets from any vault backend and infrastructure outputs into sops-encrypted files deployed to remote machines, driven by a central dogma.yml config"
