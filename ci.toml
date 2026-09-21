@@ -1,3 +1,7 @@
 crate_name  = "dogma-rust"
 binary_name = "dogma"
 pkgdesc     = "Bridges secrets from vault backends and infrastructure outputs into sops-encrypted files deployed to NixOS machines"
+
+# Shell completions: `dogma completions <bash|zsh|fish>` (subcommand is plural)
+has_shell_completions = "true"
+completion_subcommand = "completions"
