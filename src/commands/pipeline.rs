@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -540,7 +541,12 @@ fn deploy_nixos_hosts(
 
   let infra_creds = infra_output::lookup_creds(all_env_creds, env);
   let mut deployed_targets: Vec<String> = Vec::new();
-  for host in config.machines.keys() {
+  let order = deploy_order(config)?;
+  if order.len() > 1 {
+    log_dim!("pipeline deploy order: {}", order.join(" → "));
+  }
+
+  for host in order {
     log_step!("pipeline host {host}");
     let target =
       nixos::deploy_host(config, ctx.repo_root, host, env, infra_creds)?;
@@ -548,6 +554,48 @@ fn deploy_nixos_hosts(
   }
 
   Ok(deployed_targets)
+}
+
+/// Resolves the order machines are deployed in: a dependency always deploys
+/// before the machines that declare it in `depends-on`, and machines not
+/// otherwise constrained keep their dogma.yml order.
+///
+/// Stable Kahn: repeatedly take the first machine, in declaration order,
+/// whose dependencies have all been deployed. `validate` has already
+/// rejected unknown references and cycles, so this is defensive only.
+fn deploy_order(config: &DogmaConfig) -> Result<Vec<&str>> {
+  let mut order: Vec<&str> = Vec::with_capacity(config.machines.len());
+  let mut placed: HashSet<&str> = HashSet::new();
+
+  while order.len() < config.machines.len() {
+    let next = config.machines.iter().find(|(host, machine)| {
+      !placed.contains(host.as_str())
+        && machine.depends_on.names().iter().all(|dep| {
+          // An unknown dependency cannot block: validate has rejected it,
+          // and treating it as satisfied keeps this from deadlocking.
+          placed.contains(dep.as_str())
+            || !config.machines.contains_key(dep.as_str())
+        })
+    });
+
+    let Some((host, _)) = next else {
+      let remaining: Vec<&str> = config
+        .machines
+        .keys()
+        .map(String::as_str)
+        .filter(|h| !placed.contains(h))
+        .collect();
+      bail!(
+        "unresolvable depends-on between machines: {} — check for a cycle in dogma.yml",
+        remaining.join(", ")
+      );
+    };
+
+    placed.insert(host.as_str());
+    order.push(host.as_str());
+  }
+
+  Ok(order)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,5 +734,106 @@ impl Drop for DetachGuard<'_> {
         log_info!("pipeline restored branch: {}", self.original_ref);
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::deploy_order;
+  use crate::config::DogmaConfig;
+
+  fn config(machines: &[(&str, &str)]) -> DogmaConfig {
+    let body: String = machines
+      .iter()
+      .map(|(name, deps)| {
+        let deps = if deps.is_empty() {
+          String::new()
+        } else {
+          format!("    depends-on: [{deps}]\n")
+        };
+        format!(
+          "  {name}:\n    hostname: h-{name}\n    ip: \"1.2.3.4\"\n{deps}"
+        )
+      })
+      .collect();
+    let yml = format!(
+      "name: x\nenv: [test]\nadmin: []\nmachines:\n{body}secrets: {{}}\n"
+    );
+    serde_yaml::from_str(&yml).expect("test yaml should parse")
+  }
+
+  #[test]
+  fn without_depends_on_declaration_order_is_kept() {
+    let cfg = config(&[("a", ""), ("b", ""), ("c", "")]);
+    assert_eq!(deploy_order(&cfg).unwrap(), vec!["a", "b", "c"]);
+  }
+
+  #[test]
+  fn dependency_deploys_before_dependent() {
+    let cfg = config(&[("backend", "database"), ("database", "")]);
+    assert_eq!(deploy_order(&cfg).unwrap(), vec!["database", "backend"]);
+  }
+
+  #[test]
+  fn unconstrained_machines_keep_their_place() {
+    // `cache` has no dependencies, so it must not be pulled forward past
+    // the pair that does — it stays last, as written.
+    let cfg =
+      config(&[("backend", "database"), ("database", ""), ("cache", "")]);
+    assert_eq!(
+      deploy_order(&cfg).unwrap(),
+      vec!["database", "backend", "cache"]
+    );
+  }
+
+  #[test]
+  fn diamond_resolves_dependencies_first() {
+    let cfg = config(&[
+      ("top", "left, right"),
+      ("left", "base"),
+      ("right", "base"),
+      ("base", ""),
+    ]);
+    let order = deploy_order(&cfg).unwrap();
+    let pos = |n: &str| order.iter().position(|h| *h == n).unwrap();
+    assert!(pos("base") < pos("left"));
+    assert!(pos("base") < pos("right"));
+    assert!(pos("left") < pos("top"));
+    assert!(pos("right") < pos("top"));
+    assert_eq!(order.len(), 4);
+  }
+
+  #[test]
+  fn transitive_chain_is_ordered() {
+    let cfg = config(&[("a", "b"), ("b", "c"), ("c", "")]);
+    assert_eq!(deploy_order(&cfg).unwrap(), vec!["c", "b", "a"]);
+  }
+
+  #[test]
+  fn cycle_errors_rather_than_looping() {
+    // validate() rejects this first; deploy_order must still not hang.
+    let cfg = config(&[("a", "b"), ("b", "a")]);
+    let err = deploy_order(&cfg).unwrap_err().to_string();
+    assert!(err.contains("unresolvable depends-on"), "got: {err}");
+  }
+
+  #[test]
+  fn unknown_dependency_does_not_deadlock() {
+    let cfg = config(&[("a", "ghost")]);
+    assert_eq!(deploy_order(&cfg).unwrap(), vec!["a"]);
+  }
+
+  #[test]
+  fn backend_before_database_is_corrected() {
+    // The motivating case: backend is declared first but depends on the
+    // database, so the database must deploy first regardless.
+    let cfg = config(&[
+      ("server_backend", "server_database"),
+      ("server_database", ""),
+    ]);
+    assert_eq!(
+      deploy_order(&cfg).unwrap(),
+      vec!["server_database", "server_backend"]
+    );
   }
 }
