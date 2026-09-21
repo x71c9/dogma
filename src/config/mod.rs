@@ -115,12 +115,52 @@ pub struct Machine {
   #[serde(default)]
   pub secrets: Vec<String>,
 
+  /// After normalization: always a plain list of machine names.
+  #[serde(
+    rename = "depends-on",
+    default,
+    skip_serializing_if = "DependsOn::is_empty"
+  )]
+  pub depends_on: DependsOn,
+
   #[serde(skip_serializing_if = "Option::is_none")]
   pub deployer: Option<DeployStrategy>,
 }
 
 fn default_root() -> String {
   "root".to_string()
+}
+
+/// `depends-on` accepts a bare machine name or a list of them. Normalization
+/// collapses the shorthand into `Many`, mirroring `IpField::Shorthand`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum DependsOn {
+  One(String),
+  Many(Vec<String>),
+}
+
+impl Default for DependsOn {
+  fn default() -> Self {
+    DependsOn::Many(Vec::new())
+  }
+}
+
+impl DependsOn {
+  pub fn is_empty(&self) -> bool {
+    match self {
+      DependsOn::One(_) => false,
+      DependsOn::Many(v) => v.is_empty(),
+    }
+  }
+
+  /// The declared dependencies, whichever form they were written in.
+  pub fn names(&self) -> &[String] {
+    match self {
+      DependsOn::One(s) => std::slice::from_ref(s),
+      DependsOn::Many(v) => v,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

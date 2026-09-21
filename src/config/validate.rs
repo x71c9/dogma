@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 
 use super::{
   CredentialValue, DogmaConfig, IpEntry, PipelineType, SecretLeaf,
@@ -11,6 +12,8 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
   let secret_groups: Vec<&str> =
     config.secrets.keys().map(String::as_str).collect();
   let vault_keys: Vec<&str> = config.vault.keys().map(String::as_str).collect();
+  let machine_names: Vec<&str> =
+    config.machines.keys().map(String::as_str).collect();
   let has_infra = config.infra.is_some();
 
   // Machines checks
@@ -54,6 +57,34 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
           }
         }
       }
+    }
+  }
+
+  // depends-on: every dependency must name another declared machine
+  let mut depends_on_ok = true;
+  for (host, machine) in &config.machines {
+    for dep in machine.depends_on.names() {
+      if dep == host {
+        depends_on_ok = false;
+        errors.push(format!(
+          "machines.{host}.depends-on: '{host}' cannot depend on itself"
+        ));
+      } else if !machine_names.contains(&dep.as_str()) {
+        depends_on_ok = false;
+        errors.push(format!(
+          "machines.{host}.depends-on: '{dep}' is not defined in machines (available: {})",
+          machine_names.join(", ")
+        ));
+      }
+    }
+  }
+
+  // depends-on: the graph as a whole must be acyclic. Only meaningful once
+  // every edge is known to point at a real machine — a dangling edge would
+  // otherwise report a confusing cycle on top of the real error.
+  if depends_on_ok {
+    if let Some(cycle) = find_cycle(config) {
+      errors.push(format!("machines: dependency cycle: {}", cycle.join(" → ")));
     }
   }
 
@@ -178,4 +209,186 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
   }
 
   Ok(())
+}
+
+/// DFS over the `depends-on` graph, returning the first cycle found as a
+/// readable path (`a → b → a`). Assumes every edge names a declared machine,
+/// which the reference checks above guarantee.
+fn find_cycle(config: &DogmaConfig) -> Option<Vec<String>> {
+  #[derive(Clone, Copy, PartialEq)]
+  enum Mark {
+    Unvisited,
+    OnPath,
+    Done,
+  }
+
+  fn visit<'a>(
+    config: &'a DogmaConfig,
+    host: &'a str,
+    marks: &mut HashMap<&'a str, Mark>,
+    path: &mut Vec<&'a str>,
+  ) -> Option<Vec<String>> {
+    marks.insert(host, Mark::OnPath);
+    path.push(host);
+
+    if let Some(machine) = config.machines.get(host) {
+      for dep in machine.depends_on.names() {
+        // Look the key up in the config so the borrow outlives this frame.
+        let Some((dep, _)) = config.machines.get_key_value(dep.as_str()) else {
+          continue;
+        };
+        let dep = dep.as_str();
+        match marks.get(dep).copied().unwrap_or(Mark::Unvisited) {
+          // Back edge: the cycle is the path from `dep` onwards, closed up.
+          Mark::OnPath => {
+            let start = path.iter().position(|p| *p == dep).unwrap_or(0);
+            let mut cycle: Vec<String> =
+              path[start..].iter().map(|s| s.to_string()).collect();
+            cycle.push(dep.to_string());
+            return Some(cycle);
+          }
+          Mark::Unvisited => {
+            if let Some(cycle) = visit(config, dep, marks, path) {
+              return Some(cycle);
+            }
+          }
+          Mark::Done => {}
+        }
+      }
+    }
+
+    path.pop();
+    marks.insert(host, Mark::Done);
+    None
+  }
+
+  let mut marks: HashMap<&str, Mark> = HashMap::new();
+  let mut path: Vec<&str> = Vec::new();
+
+  for start in config.machines.keys() {
+    if marks
+      .get(start.as_str())
+      .copied()
+      .unwrap_or(Mark::Unvisited)
+      == Mark::Unvisited
+    {
+      if let Some(cycle) = visit(config, start, &mut marks, &mut path) {
+        return Some(cycle);
+      }
+    }
+  }
+  None
+}
+
+#[cfg(test)]
+mod tests {
+  use super::validate;
+  use crate::config::DogmaConfig;
+
+  /// Machines with the given `depends-on` bodies, sharing one secret group.
+  fn config(machines: &str) -> DogmaConfig {
+    let yml = format!(
+      "name: x\nenv: [test]\nadmin: []\nmachines:\n{machines}\nsecrets: {{}}\n"
+    );
+    serde_yaml::from_str(&yml).expect("test yaml should parse")
+  }
+
+  fn machine(name: &str, depends_on: &str) -> String {
+    format!(
+      "  {name}:\n    hostname: h-{name}\n    ip: \"1.2.3.4\"\n{depends_on}"
+    )
+  }
+
+  #[test]
+  fn no_depends_on_is_valid() {
+    let cfg = config(&format!("{}{}", machine("a", ""), machine("b", "")));
+    assert!(validate(&cfg).is_ok());
+  }
+
+  #[test]
+  fn valid_dependency_accepted() {
+    let cfg = config(&format!(
+      "{}{}",
+      machine("a", "    depends-on: [b]\n"),
+      machine("b", "")
+    ));
+    assert!(validate(&cfg).is_ok());
+  }
+
+  #[test]
+  fn shorthand_dependency_accepted() {
+    let cfg = config(&format!(
+      "{}{}",
+      machine("a", "    depends-on: b\n"),
+      machine("b", "")
+    ));
+    assert!(validate(&cfg).is_ok());
+  }
+
+  #[test]
+  fn unknown_dependency_rejected() {
+    let cfg = config(&machine("a", "    depends-on: [ghost]\n"));
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("machines.a.depends-on"));
+    assert!(err.contains("'ghost' is not defined in machines"));
+    assert!(err.contains("available: a"));
+  }
+
+  #[test]
+  fn self_dependency_rejected() {
+    let cfg = config(&machine("a", "    depends-on: [a]\n"));
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("'a' cannot depend on itself"));
+  }
+
+  #[test]
+  fn cycle_rejected() {
+    let cfg = config(&format!(
+      "{}{}",
+      machine("a", "    depends-on: [b]\n"),
+      machine("b", "    depends-on: [a]\n")
+    ));
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("dependency cycle"), "got: {err}");
+    assert!(err.contains("a"));
+    assert!(err.contains("b"));
+  }
+
+  #[test]
+  fn three_machine_cycle_rejected() {
+    let cfg = config(&format!(
+      "{}{}{}",
+      machine("a", "    depends-on: [b]\n"),
+      machine("b", "    depends-on: [c]\n"),
+      machine("c", "    depends-on: [a]\n")
+    ));
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("dependency cycle"), "got: {err}");
+  }
+
+  #[test]
+  fn diamond_is_not_a_cycle() {
+    let cfg = config(&format!(
+      "{}{}{}{}",
+      machine("top", "    depends-on: [left, right]\n"),
+      machine("left", "    depends-on: [base]\n"),
+      machine("right", "    depends-on: [base]\n"),
+      machine("base", "")
+    ));
+    assert!(validate(&cfg).is_ok());
+  }
+
+  #[test]
+  fn all_depends_on_errors_reported_together() {
+    let cfg = config(&format!(
+      "{}{}",
+      machine("a", "    depends-on: [ghost, a]\n"),
+      machine("b", "    depends-on: [phantom]\n")
+    ));
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("'ghost'"));
+    assert!(err.contains("cannot depend on itself"));
+    assert!(err.contains("'phantom'"));
+    assert!(err.contains("3 error(s) found"), "got: {err}");
+  }
 }

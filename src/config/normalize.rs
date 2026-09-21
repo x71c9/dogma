@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use std::path::Path;
 
-use super::{DogmaConfig, EnvOrMap, HostnameField, IpField, NixBlock};
+use super::{
+  DependsOn, DogmaConfig, EnvOrMap, HostnameField, IpField, NixBlock,
+};
 use crate::log_warn;
 
 pub fn normalize(repo_root: &Path) -> Result<DogmaConfig> {
@@ -26,10 +28,11 @@ pub fn normalize(repo_root: &Path) -> Result<DogmaConfig> {
 /// Serde ignores unknown fields, so a mistyped or misplaced key in dogma.yml
 /// is silently dropped — e.g. a `pre_deploy:` hook (kebab-case is required).
 /// Collect warnings for the schema levels where every key is fixed: top
-/// level, pipeline entries, and hook blocks. Sections with user-chosen keys
-/// (vault, machines, secrets) are not checked. Also warns when a top-level
-/// `hooks` block (valid only for the implicit default pipeline) coexists
-/// with declared pipelines, which ignore it.
+/// level, pipeline entries, hook blocks, and the fields inside each machine.
+/// Levels whose keys are user-chosen (machine/vault/secret *names*, and
+/// everything under vault and secrets) are not checked. Also warns when a
+/// top-level `hooks` block (valid only for the implicit default pipeline)
+/// coexists with declared pipelines, which ignore it.
 fn unknown_key_warnings(raw: &str) -> Vec<String> {
   const TOP: &[&str] = &[
     "name", "env", "admin", "vault", "machines", "secrets", "infra", "nix",
@@ -45,6 +48,14 @@ fn unknown_key_warnings(raw: &str) -> Vec<String> {
     "command",
     "env",
     "hooks",
+  ];
+  const MACHINE: &[&str] = &[
+    "hostname",
+    "ip",
+    "user",
+    "secrets",
+    "deployer",
+    "depends-on",
   ];
   const HOOKS: &[&str] = &["pre-deploy", "post-deploy"];
 
@@ -64,6 +75,25 @@ fn unknown_key_warnings(raw: &str) -> Vec<String> {
       warnings.push(format!(
         "dogma.yml: unknown top-level key '{key}' — ignored"
       ));
+    }
+  }
+
+  // Machine names are user-chosen, but the fields inside each machine are a
+  // fixed schema — a mistyped `depends_on:` would otherwise be dropped in
+  // silence, leaving the deploy order quietly unchanged.
+  if let Some(machines) = value.get("machines").and_then(|m| m.as_mapping()) {
+    for (name, machine) in machines {
+      let (Some(name), Some(fields)) = (name.as_str(), machine.as_mapping())
+      else {
+        continue;
+      };
+      for key in fields.keys().filter_map(|k| k.as_str()) {
+        if !MACHINE.contains(&key) {
+          warnings.push(format!(
+            "dogma.yml: machines.{name}: unknown key '{key}' — ignored"
+          ));
+        }
+      }
     }
   }
 
@@ -179,6 +209,11 @@ fn expand_defaults(config: &mut DogmaConfig) {
       let per_env: IndexMap<String, _> =
         envs.iter().map(|e| (e.clone(), entry.clone())).collect();
       machine.ip = IpField::PerEnv(per_env);
+    }
+
+    // depends-on shorthand: bare name -> single-element list
+    if let DependsOn::One(dep) = &machine.depends_on.clone() {
+      machine.depends_on = DependsOn::Many(vec![dep.clone()]);
     }
   }
 
@@ -340,5 +375,57 @@ pipeline:
   #[test]
   fn unparseable_yaml_yields_no_warnings() {
     assert!(unknown_key_warnings(": not yaml : [").is_empty());
+  }
+
+  #[test]
+  fn clean_machine_yields_no_warnings() {
+    let yml = r#"
+name: x
+env: [dev]
+admin: []
+machines:
+  backend:
+    hostname: h-{env}
+    ip: "1.2.3.4"
+    user: deployer
+    secrets: [backend]
+    deployer: nixos-rebuild
+    depends-on: [database]
+"#;
+    assert!(unknown_key_warnings(yml).is_empty());
+  }
+
+  #[test]
+  fn snake_case_depends_on_warns() {
+    let yml = r#"
+name: x
+env: [dev]
+admin: []
+machines:
+  backend:
+    hostname: h
+    depends_on: [database]
+"#;
+    let warnings = unknown_key_warnings(yml);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("machines.backend"));
+    assert!(warnings[0].contains("'depends_on'"));
+  }
+
+  #[test]
+  fn unknown_machine_key_warns() {
+    let yml = r#"
+name: x
+env: [dev]
+admin: []
+machines:
+  backend:
+    hostname: h
+    secrest: [backend]
+"#;
+    let warnings = unknown_key_warnings(yml);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("machines.backend"));
+    assert!(warnings[0].contains("'secrest'"));
   }
 }
