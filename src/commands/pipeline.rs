@@ -344,16 +344,22 @@ pub fn run(repo_root: &Path, opts: PipelineOptions) -> Result<()> {
   Ok(())
 }
 
-/// Commit tracked changes made mid-pipeline (hooks, secret generation),
-/// folding them into the deploy commit when dogma already owns one. Returns
-/// true when anything was committed.
+/// Commit changes made mid-pipeline (hooks, secret generation), folding them
+/// into the deploy commit when dogma already owns one. Returns true when
+/// anything was committed.
+///
+/// Untracked files count: on a machine's first deploy the encrypted secrets
+/// and `.sops.yaml` are new files, and a flake only sees tracked files — left
+/// out here, nixos-rebuild would build a system without its secrets. The
+/// commit itself stages everything not ignored (`add_all "*"`), so the check
+/// must see the same set.
 fn absorb_changes(
   repo: &git2::Repository,
   created_deploy_commit: bool,
   version: &str,
   what: &str,
 ) -> Result<bool> {
-  let dirty = git::dirty_files(repo, false)?;
+  let dirty = git::dirty_files(repo, true)?;
   if dirty.is_empty() {
     return Ok(false);
   }
@@ -734,6 +740,100 @@ impl Drop for DetachGuard<'_> {
         log_info!("pipeline restored branch: {}", self.original_ref);
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod absorb_tests {
+  use super::absorb_changes;
+  use std::path::Path;
+
+  /// Repository with one commit (README) and a committer identity.
+  fn repo_with_commit(dir: &Path) -> git2::Repository {
+    let repo = git2::Repository::init(dir).unwrap();
+    {
+      let mut cfg = repo.config().unwrap();
+      cfg.set_str("user.name", "test").unwrap();
+      cfg.set_str("user.email", "test@example.com").unwrap();
+    }
+    std::fs::write(dir.join("README"), "x\n").unwrap();
+    {
+      let mut index = repo.index().unwrap();
+      index.add_path(Path::new("README")).unwrap();
+      index.write().unwrap();
+      let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+      let sig = repo.signature().unwrap();
+      repo
+        .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .unwrap();
+    }
+    repo
+  }
+
+  fn head_has(repo: &git2::Repository, path: &str) -> bool {
+    let tree = repo.head().unwrap().peel_to_tree().unwrap();
+    tree.get_path(Path::new(path)).is_ok()
+  }
+
+  fn commit_count(repo: &git2::Repository) -> usize {
+    let mut walk = repo.revwalk().unwrap();
+    walk.push_head().unwrap();
+    walk.count()
+  }
+
+  #[test]
+  fn first_deploy_commits_new_secret_files() {
+    // Only untracked files changed: the first deploy of a machine.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path());
+    std::fs::create_dir_all(dir.path().join("nix/secrets/prod/m")).unwrap();
+    std::fs::write(dir.path().join("nix/secrets/prod/m/g.yaml"), "k: v\n")
+      .unwrap();
+    std::fs::write(dir.path().join("nix/.sops.yaml"), "creation_rules: []\n")
+      .unwrap();
+
+    assert!(absorb_changes(
+      &repo,
+      false,
+      "deploy/v26.09.0001",
+      "deploy changes"
+    )
+    .unwrap());
+    assert!(head_has(&repo, "nix/secrets/prod/m/g.yaml"));
+    assert!(head_has(&repo, "nix/.sops.yaml"));
+    assert_eq!(commit_count(&repo), 2);
+  }
+
+  #[test]
+  fn new_files_fold_into_existing_deploy_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path());
+    std::fs::write(dir.path().join("new.yaml"), "k: v\n").unwrap();
+
+    assert!(absorb_changes(
+      &repo,
+      true,
+      "deploy/v26.09.0001",
+      "deploy changes"
+    )
+    .unwrap());
+    assert!(head_has(&repo, "new.yaml"));
+    assert_eq!(commit_count(&repo), 1, "amended, not a new commit");
+  }
+
+  #[test]
+  fn clean_tree_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_commit(dir.path());
+
+    assert!(!absorb_changes(
+      &repo,
+      false,
+      "deploy/v26.09.0001",
+      "deploy changes"
+    )
+    .unwrap());
+    assert_eq!(commit_count(&repo), 1);
   }
 }
 
