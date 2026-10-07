@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo clippy *)",
+      "Bash(cargo build *)",
+      "Bash(./target/debug/dogma infra *)",
+      "Bash(xargs -I{} basename {} .sh)",
+      "Read(//home/x71c9/depositi/aura/custom/**)",
+      "Bash(cargo install *)",
+      "Bash(makepkg --printsrcinfo)",
+      "Bash(curl -sI https://github.com/x71c9/dogma/releases/download/v0.1.0/dogma-x86_64-unknown-linux-gnu.tar.gz)",
+      "Bash(cargo fmt *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "Bash(git merge *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(shellcheck *)",
+      "Bash(curl -s https://raw.githubusercontent.com/nix-community/NUR/master/repos.json)",
+      "Bash(gh repo *)",
+      "Bash(gh auth *)",
+      "Read(//home/x71c9/depositi/tempesta/**)",
+      "Bash(mkdir -p scripts/hooks)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if 'supabase' in k.lower\\(\\)}, indent=2\\)\\)\")",
+      "Bash(cp /home/x71c9/depositi/memorabit/nix/modules/common/dogma-secrets.nix /home/x71c9/depositi/aura/nix/modules/common/dogma-secrets.nix)",
+      "Bash(cp /home/x71c9/depositi/memorabit/nix/modules/common/dogma-container.nix /home/x71c9/depositi/aura/nix/modules/common/dogma-container.nix)",
+      "Bash(cargo doc *)",
+      "Read(//home/x71c9/.cargo/registry/src/**)",
+      "Bash(awk -F: '$1>=249 && $1<=345')",
+      "Bash(git -C /home/x71c9/depositi/dogma show 76da2d3 --stat)"
+    ]
+  }
+}
