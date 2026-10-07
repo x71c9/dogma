@@ -404,3 +404,4 @@ The binary runs on any Linux with no runtime deps. External tools are checked la
 | `ssh-to-age` | `deploy --new` |
 | `sops` | `deploy --new` |
 | `nixos-rebuild` | `deploy` (nixos-rebuild strategy) |
+
