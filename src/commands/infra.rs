@@ -7,6 +7,7 @@ use crate::config::normalize::normalize;
 use crate::config::validate::validate;
 use crate::config::{CredentialValue, DogmaConfig};
 use crate::error::check_dep;
+use crate::infra::encryption::tf_encryption;
 use crate::vault;
 use crate::{git, log_dim, log_info, log_step, log_warn};
 
@@ -259,15 +260,27 @@ pub fn resolve_credentials(
     None => return Ok(vec![]),
   };
 
+  let resolve = |cred: &CredentialValue| -> Result<String> {
+    match cred {
+      CredentialValue::Static(s) => Ok(s.clone()),
+      CredentialValue::FromVault { vault_ref, .. } => {
+        vault::read(config, env, vault_ref)
+      }
+    }
+  };
+
   let mut creds = Vec::new();
   for (var_name, cred) in &infra.credentials {
-    let value = match cred {
-      CredentialValue::Static(s) => s.clone(),
-      CredentialValue::FromVault { vault_ref, .. } => {
-        vault::read(config, env, vault_ref)?
-      }
-    };
-    creds.push((var_name.clone(), value));
+    creds.push((var_name.clone(), resolve(cred)?));
+  }
+  // Every tofu invocation (init, plan/apply/destroy, output) takes its env
+  // from here, so the state is never read or written without encryption.
+  if let Some(enc) = &infra.state_encryption {
+    let passphrase = resolve(&enc.passphrase)?;
+    creds.push((
+      "TF_ENCRYPTION".to_string(),
+      tf_encryption(&passphrase, enc.migrate)?,
+    ));
   }
   Ok(creds)
 }
