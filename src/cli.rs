@@ -86,7 +86,7 @@ pub enum Commands {
     message: Option<String>,
   },
 
-  /// Infrastructure management (apply/destroy)
+  /// Infrastructure management (apply/destroy/init/run/auth)
   Infra {
     #[command(subcommand)]
     command: InfraCommands,
@@ -123,6 +123,9 @@ pub enum InfraCommands {
     /// Commit message for dirty tree (skips interactive prompt)
     #[arg(short = 'm', long)]
     message: Option<String>,
+    /// Extra tofu apply args after `--` (e.g. -- -target=module.x)
+    #[arg(last = true, value_name = "TOFU_ARGS")]
+    extra_args: Vec<String>,
   },
   /// Normalize, validate, init, then run tofu destroy
   Destroy {
@@ -136,6 +139,26 @@ pub enum InfraCommands {
     /// Pass -upgrade to tofu init (updates provider lock file)
     #[arg(long, conflicts_with = "migrate_state")]
     upgrade: bool,
+    /// Extra tofu destroy args after `--` (e.g. -- -target=module.x)
+    #[arg(last = true, value_name = "TOFU_ARGS")]
+    extra_args: Vec<String>,
+  },
+  /// Normalize, validate, init, then run any tofu command in the unit
+  /// (plan, state list, output, import, …; not apply/destroy/init)
+  Run {
+    /// Environment name
+    env: String,
+    /// Infra unit name
+    unit: String,
+    /// Tofu command and args, passed as-is (e.g. `state list`,
+    /// `plan -target=module.x`)
+    #[arg(
+      required = true,
+      trailing_var_arg = true,
+      allow_hyphen_values = true,
+      value_name = "TOFU_ARGS"
+    )]
+    args: Vec<String>,
   },
   /// Normalize, validate, then run tofu init (always re-runs, even if the
   /// unit looks already initialized)
@@ -156,4 +179,96 @@ pub enum InfraCommands {
     /// Environment name
     env: String,
   },
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Cli, Commands, InfraCommands};
+  use clap::Parser;
+
+  fn infra(argv: &[&str]) -> Result<InfraCommands, clap::Error> {
+    let mut full = vec!["dogma", "infra"];
+    full.extend_from_slice(argv);
+    match Cli::try_parse_from(full)?.command {
+      Some(Commands::Infra { command }) => Ok(command),
+      _ => panic!("expected an infra command"),
+    }
+  }
+
+  #[test]
+  fn run_keeps_args_verbatim() {
+    let InfraCommands::Run { env, unit, args } =
+      infra(&["run", "prod", "u", "plan", "-target=module.x", "-no-color"])
+        .unwrap()
+    else {
+      panic!("expected run");
+    };
+    assert_eq!((env.as_str(), unit.as_str()), ("prod", "u"));
+    assert_eq!(args, ["plan", "-target=module.x", "-no-color"]);
+  }
+
+  #[test]
+  fn run_accepts_double_dash() {
+    let InfraCommands::Run { args, .. } =
+      infra(&["run", "prod", "u", "--", "state", "list"]).unwrap()
+    else {
+      panic!("expected run");
+    };
+    assert_eq!(args, ["state", "list"]);
+  }
+
+  #[test]
+  fn run_global_flag_position() {
+    let cli = Cli::try_parse_from([
+      "dogma", "infra", "run", "p", "u", "--time", "plan",
+    ])
+    .unwrap();
+    let Some(Commands::Infra {
+      command: InfraCommands::Run { args, .. },
+    }) = cli.command
+    else {
+      panic!("expected run");
+    };
+    assert!(cli.time);
+    assert_eq!(args, ["plan"]);
+
+    // once the tofu command has started, every arg is tofu's
+    let cli = Cli::try_parse_from([
+      "dogma", "infra", "run", "p", "u", "plan", "--time",
+    ])
+    .unwrap();
+    let Some(Commands::Infra {
+      command: InfraCommands::Run { args, .. },
+    }) = cli.command
+    else {
+      panic!("expected run");
+    };
+    assert!(!cli.time);
+    assert_eq!(args, ["plan", "--time"]);
+  }
+
+  #[test]
+  fn run_requires_args() {
+    assert!(infra(&["run", "prod", "u"]).is_err());
+  }
+
+  #[test]
+  fn apply_extra_args_after_double_dash() {
+    let InfraCommands::Apply { extra_args, .. } =
+      infra(&["apply", "prod", "u", "--", "-target=module.x"]).unwrap()
+    else {
+      panic!("expected apply");
+    };
+    assert_eq!(extra_args, ["-target=module.x"]);
+  }
+
+  #[test]
+  fn apply_without_extra_args() {
+    let InfraCommands::Apply { extra_args, .. } =
+      infra(&["apply", "prod", "u", "--upgrade"]).unwrap()
+    else {
+      panic!("expected apply");
+    };
+    assert!(extra_args.is_empty());
+  }
 }

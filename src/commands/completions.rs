@@ -65,11 +65,16 @@ _dogma_completions() {
             ;;
         infra)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=($(compgen -W "apply destroy init auth" -- "$cur"))
+                COMPREPLY=($(compgen -W "apply destroy init run auth" -- "$cur"))
             elif [[ $cword -eq 3 ]]; then
                 COMPREPLY=($(compgen -W "$(_dogma_list_envs)" -- "$cur"))
             elif [[ $cword -eq 4 ]]; then
                 COMPREPLY=($(compgen -W "$(_dogma_list_units)" -- "$cur"))
+            elif [[ "${words[2]}" == run ]]; then
+                # run: the tofu command, then free-form tofu args
+                if [[ $cword -eq 5 ]]; then
+                    COMPREPLY=($(compgen -W "plan state output show import console providers refresh validate force-unlock taint untaint graph" -- "$cur"))
+                fi
             elif [[ $cword -ge 5 ]]; then
                 COMPREPLY=($(compgen -W "--migrate-state --upgrade" -- "$cur"))
             fi
@@ -162,7 +167,7 @@ _dogma() {
                     ;;
                 infra)
                     _arguments \
-                        '2: :(apply destroy init auth)' \
+                        '2: :(apply destroy init run auth)' \
                         '3: :_dogma_envs' \
                         '4: :_dogma_units' \
                         '--migrate-state[pass -migrate-state to init]' \
@@ -239,9 +244,9 @@ complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l skip-infra   -d 
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -l refetch      -d 'clear caches'
 complete -c dogma -f -n "__fish_seen_subcommand_from deploy" -s m            -d 'commit message'
 
-# infra: apply/destroy/init/auth, then <env>, then <unit>
+# infra: apply/destroy/init/run/auth, then <env>, then <unit>
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 2" \
-    -a "apply destroy init auth"
+    -a "apply destroy init run auth"
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 3" \
     -a "(__dogma_envs)" -d 'environment'
 complete -c dogma -f -n "__fish_seen_subcommand_from infra; and test (count (commandline -opc)) -eq 4" \
