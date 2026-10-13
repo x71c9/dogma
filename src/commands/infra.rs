@@ -27,6 +27,8 @@ struct InfraFlags {
   upgrade: bool,
   subcommand: &'static str,
   commit_msg: Option<String>,
+  /// Appended after `-var-file` (e.g. `-target=…`, `-replace=…`)
+  extra_args: Vec<String>,
 }
 
 /// Shared preamble for unit-scoped infra commands: env is declared, the infra
@@ -64,6 +66,7 @@ pub fn apply(
   migrate_state: bool,
   upgrade: bool,
   commit_msg: Option<String>,
+  extra_args: Vec<String>,
 ) -> Result<()> {
   let config = normalize(repo_root)?;
   validate(&config)?;
@@ -77,6 +80,7 @@ pub fn apply(
       upgrade,
       subcommand: "apply",
       commit_msg,
+      extra_args,
     },
   )
 }
@@ -119,6 +123,7 @@ pub fn destroy(
   unit: &str,
   migrate_state: bool,
   upgrade: bool,
+  extra_args: Vec<String>,
 ) -> Result<()> {
   let config = normalize(repo_root)?;
   validate(&config)?;
@@ -132,8 +137,110 @@ pub fn destroy(
       upgrade,
       subcommand: "destroy",
       commit_msg: None,
+      extra_args,
     },
   )
+}
+
+/// `dogma infra run <env> <unit> <args…>`: the same preamble as apply
+/// (validate, credentials, init against the env's backend), then `<cli>
+/// <args…>` in the unit directory. The env's tfvars reach the commands that
+/// take variables through `TF_CLI_ARGS` (placed by tofu right after the
+/// subcommand, so positional args like `state show <addr>` keep working).
+pub fn run(
+  repo_root: &Path,
+  env: &str,
+  unit: &str,
+  args: Vec<String>,
+) -> Result<()> {
+  check_passthrough(&args)?;
+
+  let config = normalize(repo_root)?;
+  validate(&config)?;
+
+  let unit_dir = check_unit(&config, repo_root, env, unit)?;
+  let credentials = resolve_credentials(&config, env)?;
+
+  log_step!("infra init {unit}");
+  init_unit(
+    &config,
+    repo_root,
+    &unit_dir,
+    env,
+    unit,
+    &InitOptions::default(),
+    &credentials,
+  )?;
+
+  let infra = config.infra.as_ref().unwrap();
+  let cli = &infra.cli;
+  let tfvars = resolve_template(
+    repo_root,
+    infra.path.trim_start_matches("./"),
+    &infra.var_file,
+    env,
+  );
+  let var_file_env = var_file_env(&args, &tfvars);
+  if var_file_env.is_none() && !tfvars.exists() {
+    log_dim!("infra no tfvars at {} — none passed", tfvars.display());
+  }
+
+  let shown = args.join(" ");
+  log_step!("infra {cli} {shown} ({unit})");
+  let status = Command::new(cli)
+    .current_dir(&unit_dir)
+    .args(&args)
+    .envs(credentials.iter().cloned())
+    .envs(var_file_env)
+    .status()
+    .with_context(|| format!("failed to run '{cli} {shown}'"))?;
+
+  if !status.success() {
+    match status.code() {
+      Some(code) => bail!("'{cli} {shown}' exited with status {code}"),
+      None => bail!("'{cli} {shown}' was terminated by a signal"),
+    }
+  }
+  Ok(())
+}
+
+/// The tofu subcommand of a passthrough: the first arg that is not a flag
+/// (global options such as `-chdir=…` come before it).
+fn passthrough_subcommand(args: &[String]) -> Option<&str> {
+  args
+    .iter()
+    .map(String::as_str)
+    .find(|a| !a.starts_with('-'))
+}
+
+/// `apply`, `destroy` and `init` have dogma wrappers that do more than tofu
+/// (dirty-tree commit, `infra-applied` tag, output cache, backend config):
+/// running them raw would skip that.
+fn check_passthrough(args: &[String]) -> Result<()> {
+  match passthrough_subcommand(args) {
+    Some(sub @ ("apply" | "destroy" | "init")) => bail!(
+      "'{sub}' is not allowed in 'dogma infra run' — use 'dogma infra {sub} \
+       <env> <unit>' (extra tofu args after '--')"
+    ),
+    _ => Ok(()),
+  }
+}
+
+/// `TF_CLI_ARGS=-var-file="<tfvars>"` when the tfvars file exists and the
+/// subcommand accepts variables. OpenTofu ≥ 1.8 accepts `-var-file` on nearly
+/// every command (state, output, show, …); only these reject it.
+fn var_file_env(args: &[String], tfvars: &Path) -> Option<(String, String)> {
+  const NO_VARS: [&str; 5] = ["fmt", "version", "login", "logout", "metadata"];
+  if !tfvars.exists() {
+    return None;
+  }
+  match passthrough_subcommand(args) {
+    Some(sub) if NO_VARS.contains(&sub) => None,
+    _ => Some((
+      "TF_CLI_ARGS".to_string(),
+      format!("-var-file=\"{}\"", tfvars.display()),
+    )),
+  }
 }
 
 fn run_infra(
@@ -148,6 +255,7 @@ fn run_infra(
     upgrade,
     subcommand,
     commit_msg,
+    extra_args,
   } = flags;
 
   let unit_dir = check_unit(config, repo_root, env, unit)?;
@@ -181,7 +289,15 @@ fn run_infra(
   )?;
 
   log_step!("infra {subcommand} {unit}");
-  run_subcommand(config, repo_root, &unit_dir, env, subcommand, &credentials)?;
+  run_subcommand(
+    config,
+    repo_root,
+    &unit_dir,
+    env,
+    subcommand,
+    &extra_args,
+    &credentials,
+  )?;
 
   // Cache this unit's outputs now that apply succeeded: they exist in remote
   // state, so `dogma output`/`env`/`deploy` can read them without a separate
@@ -504,6 +620,7 @@ fn run_subcommand(
   unit_dir: &Path,
   env: &str,
   subcommand: &str,
+  extra_args: &[String],
   credentials: &[(String, String)],
 ) -> Result<()> {
   let infra = config.infra.as_ref().unwrap();
@@ -518,6 +635,7 @@ fn run_subcommand(
   let status = Command::new(cli)
     .current_dir(unit_dir)
     .args([subcommand, &format!("-var-file={}", tfvars.display())])
+    .args(extra_args)
     .envs(credentials.iter().cloned())
     .status()
     .with_context(|| format!("failed to run '{cli} {subcommand}'"))?;
@@ -526,6 +644,62 @@ fn run_subcommand(
     bail!("'{cli} {subcommand}' failed");
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+  use super::{check_passthrough, var_file_env};
+  use std::path::Path;
+
+  fn args(s: &str) -> Vec<String> {
+    s.split_whitespace().map(String::from).collect()
+  }
+
+  #[test]
+  fn read_only_commands_allowed() {
+    for a in [
+      "plan",
+      "state list",
+      "state show x.y",
+      "output",
+      "import a b",
+    ] {
+      assert!(check_passthrough(&args(a)).is_ok(), "{a}");
+    }
+  }
+
+  #[test]
+  fn wrapped_commands_rejected() {
+    for a in ["apply", "destroy -auto-approve", "-chdir=x init"] {
+      let err = check_passthrough(&args(a)).unwrap_err().to_string();
+      assert!(
+        err.contains("not allowed in 'dogma infra run'"),
+        "{a}: {err}"
+      );
+    }
+  }
+
+  #[test]
+  fn var_file_set_when_tfvars_exists() {
+    let tfvars = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let (k, v) = var_file_env(&args("state show x"), &tfvars).unwrap();
+    assert_eq!(k, "TF_CLI_ARGS");
+    assert_eq!(v, format!("-var-file=\"{}\"", tfvars.display()));
+  }
+
+  #[test]
+  fn var_file_skipped_for_commands_without_vars() {
+    let tfvars = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    for a in ["fmt -check", "version", "-chdir=x metadata functions"] {
+      assert!(var_file_env(&args(a), &tfvars).is_none(), "{a}");
+    }
+  }
+
+  #[test]
+  fn var_file_skipped_when_tfvars_missing() {
+    let missing = Path::new("/nonexistent/main.tfvars");
+    assert!(var_file_env(&args("plan"), missing).is_none());
+  }
 }
 
 #[cfg(test)]

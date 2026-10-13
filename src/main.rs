@@ -138,6 +138,7 @@ fn run() -> Result<()> {
         migrate_state,
         upgrade,
         message,
+        extra_args,
       } => {
         commands::infra::apply(
           &repo_root,
@@ -146,6 +147,7 @@ fn run() -> Result<()> {
           migrate_state,
           upgrade,
           message,
+          extra_args,
         )?;
       }
       InfraCommands::Destroy {
@@ -153,6 +155,7 @@ fn run() -> Result<()> {
         unit,
         migrate_state,
         upgrade,
+        extra_args,
       } => {
         commands::infra::destroy(
           &repo_root,
@@ -160,7 +163,11 @@ fn run() -> Result<()> {
           &unit,
           migrate_state,
           upgrade,
+          extra_args,
         )?;
+      }
+      InfraCommands::Run { env, unit, args } => {
+        commands::infra::run(&repo_root, &env, &unit, args)?;
       }
       InfraCommands::Init {
         env,
