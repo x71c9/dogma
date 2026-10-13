@@ -135,6 +135,33 @@ pub fn validate(config: &DogmaConfig) -> Result<()> {
         }
       }
     }
+
+    if let Some(enc) = &infra.state_encryption {
+      if infra.credentials.contains_key("TF_ENCRYPTION") {
+        errors.push(
+          "infra.credentials.TF_ENCRYPTION: conflicts with infra.state_encryption"
+            .to_string(),
+        );
+      }
+      match &enc.passphrase {
+        CredentialValue::Static(_) => errors.push(
+          "infra.state_encryption.passphrase: must be from:vault, not a static value"
+            .to_string(),
+        ),
+        CredentialValue::FromVault { vault_ref, .. } => {
+          if vault_ref.is_empty() {
+            errors.push(
+              "infra.state_encryption.passphrase: from:vault requires a 'ref' field"
+                .to_string(),
+            );
+          } else if !vault_keys.contains(&vault_ref.as_str()) {
+            errors.push(format!(
+              "infra.state_encryption.passphrase: ref '{vault_ref}' is not defined in vault"
+            ));
+          }
+        }
+      }
+    }
   }
 
   // Pipeline checks
@@ -390,5 +417,63 @@ mod tests {
     assert!(err.contains("cannot depend on itself"));
     assert!(err.contains("'phantom'"));
     assert!(err.contains("3 error(s) found"), "got: {err}");
+  }
+
+  /// No machines, one vault entry `pp`, and the given `infra` body.
+  fn infra_config(infra: &str) -> DogmaConfig {
+    let yml = format!(
+      "name: x\nenv: [test]\nadmin: []\nmachines: {{}}\nsecrets: {{}}\n\
+       vault:\n  pp:\n    pass: some/path\ninfra:\n{infra}"
+    );
+    serde_yaml::from_str(&yml).expect("test yaml should parse")
+  }
+
+  #[test]
+  fn state_encryption_from_vault_accepted() {
+    let cfg = infra_config(
+      "  state_encryption:\n    passphrase: {from: vault, ref: pp}\n    migrate: true\n",
+    );
+    let enc = cfg
+      .infra
+      .as_ref()
+      .unwrap()
+      .state_encryption
+      .as_ref()
+      .unwrap();
+    assert!(enc.migrate);
+    assert!(validate(&cfg).is_ok());
+  }
+
+  #[test]
+  fn state_encryption_static_rejected() {
+    let cfg = infra_config(
+      "  state_encryption:\n    passphrase: plaintext-passphrase-in-yaml\n",
+    );
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(err.contains("must be from:vault"), "got: {err}");
+  }
+
+  #[test]
+  fn state_encryption_unknown_ref_rejected() {
+    let cfg = infra_config(
+      "  state_encryption:\n    passphrase: {from: vault, ref: ghost}\n",
+    );
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(
+      err.contains("'ghost' is not defined in vault"),
+      "got: {err}"
+    );
+  }
+
+  #[test]
+  fn state_encryption_conflicts_with_tf_encryption_credential() {
+    let cfg = infra_config(
+      "  credentials:\n    TF_ENCRYPTION: x\n  state_encryption:\n    passphrase: {from: vault, ref: pp}\n",
+    );
+    let err = validate(&cfg).unwrap_err().to_string();
+    assert!(
+      err.contains("conflicts with infra.state_encryption"),
+      "got: {err}"
+    );
   }
 }

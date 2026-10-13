@@ -255,6 +255,25 @@ pub struct InfraBlock {
 
   #[serde(default)]
   pub credentials: IndexMap<String, CredentialValue>,
+
+  /// Optional client-side encryption of the state and plan files (OpenTofu
+  /// state encryption, pbkdf2 + aes_gcm). When present, every tofu invocation
+  /// receives a generated `TF_ENCRYPTION`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub state_encryption: Option<StateEncryption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StateEncryption {
+  /// Passphrase of the pbkdf2 key provider (min. 16 characters). Must come
+  /// from the vault: a static value would sit in plaintext in dogma.yml.
+  pub passphrase: CredentialValue,
+
+  /// Migration of existing plaintext states: adds an `unencrypted` fallback
+  /// so they can be read once and written back encrypted. Without it,
+  /// `enforced = true` forbids any unencrypted read or write.
+  #[serde(default)]
+  pub migrate: bool,
 }
 
 fn default_tofu() -> String {
