@@ -3,6 +3,7 @@ name = "dogma-rust"
 version = "3.4.1"
 authors = ["x71c9 <mail@x71c9.com>"]
 edition = "2021"
+rust-version = "1.88"
 description = "Opinionated CLI that bridges secrets from any vault backend and infrastructure outputs into sops-encrypted files deployed to remote machines, driven by a central dogma.yml config"
 repository = "https://github.com/x71c9/dogma"
 license = "MIT"
