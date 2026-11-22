@@ -1,6 +1,6 @@
 [package]
 name = "dogma-rust"
-version = "3.4.1"
+version = "3.4.2"
 authors = ["x71c9 <mail@x71c9.com>"]
 edition = "2021"
 rust-version = "1.88"
